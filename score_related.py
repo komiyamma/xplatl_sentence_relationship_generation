@@ -6,7 +6,7 @@ Copyright (c) 2025 Akitsugu Komiyama
 import argparse
 import json
 from pathlib import Path
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any, Tuple, Optional
 
 import joblib
 import numpy as np
@@ -124,6 +124,243 @@ def _minmax(x: np.ndarray) -> np.ndarray:
     return (x - mn) / (mx - mn)
 
 
+def _select_candidates_from_sims(sims: np.ndarray, topk: int, rerank_topk: int) -> np.ndarray:
+    order = np.argsort(-sims)
+    cand_k = max(int(rerank_topk), int(topk) * 5)
+    return order[:cand_k]
+
+
+def _build_q_emb_for_doc(doc_id: int,
+                         pre: Optional[Dict[str, Any]],
+                         model,
+                         id_map: Dict[str, Any],
+                         src_root: Path,
+                         drop_selectors: List[str],
+                         embed_max_chars: int,
+                         embed_overlap: int) -> np.ndarray:
+    if pre is not None and int(doc_id) in pre.get("doc_index", {}):
+        s0, e0 = pre["doc_index"][int(doc_id)]
+        return pre["emb"][int(s0):int(e0)]
+    # fallback: compute from source HTML only if model is provided
+    p = Path(src_root) / id_map[str(int(doc_id))]["path"]
+    raw_q = p.read_text(encoding="utf-8", errors="ignore")
+    parts_q = extract_text_from_html(raw_q, drop_selectors)
+    q_text = normalize_text((parts_q["title"] + " ") + (parts_q["headings"] + " ") + parts_q["body"])
+    q_chunks = _chunk_text(q_text, embed_max_chars, embed_overlap)
+    if model is None or not q_chunks:
+        return np.zeros((0, 0), dtype=np.float32)
+    return _embed_texts(model, [t for _, _, t in q_chunks])
+
+
+def _compute_emb_scores_for_candidates(q_emb: np.ndarray,
+                                       cand_indices: np.ndarray,
+                                       pre: Optional[Dict[str, Any]],
+                                       model,
+                                       id_map: Dict[str, Any],
+                                       src_root: Path,
+                                       drop_selectors: List[str],
+                                       embed_max_chars: int,
+                                       embed_overlap: int,
+                                       exclude_doc_id: int) -> Tuple[np.ndarray, np.ndarray]:
+    emb_doc_ids = cand_indices.astype(np.int32)
+    emb_scores = np.zeros(len(emb_doc_ids), dtype=np.float32)
+
+    if q_emb.size == 0:
+        return emb_doc_ids, emb_scores
+
+    if pre is not None:
+        emb_all = pre["emb"]
+        doc_index = pre["doc_index"]
+        for i2, idx in enumerate(emb_doc_ids):
+            if int(idx) == int(exclude_doc_id):
+                emb_scores[i2] = 0.0
+                continue
+            if int(idx) not in doc_index:
+                emb_scores[i2] = 0.0
+                continue
+            s1, e1 = doc_index[int(idx)]
+            doc_emb = emb_all[int(s1):int(e1)]
+            sim = np.max(q_emb @ doc_emb.T) if doc_emb.size and q_emb.size else 0.0
+            emb_scores[i2] = float(sim)
+        return emb_doc_ids, emb_scores
+
+    # no precomputed embeddings; compute on the fly if model provided
+    if model is None:
+        return emb_doc_ids, emb_scores
+    for i2, idx in enumerate(emb_doc_ids):
+        if int(idx) == int(exclude_doc_id):
+            emb_scores[i2] = 0.0
+            continue
+        meta2 = id_map[str(int(idx))]
+        p2 = Path(src_root) / meta2["path"]
+        raw2 = p2.read_text(encoding="utf-8", errors="ignore")
+        parts2 = extract_text_from_html(raw2, drop_selectors)
+        d_text = normalize_text((parts2["title"] + " ") + (parts2["headings"] + " ") + parts2["body"])
+        d_chunks = _chunk_text(d_text, embed_max_chars, embed_overlap)
+        if not d_chunks:
+            emb_scores[i2] = 0.0
+            continue
+        d_emb = _embed_texts(model, [t for _, _, t in d_chunks])
+        sim = np.max(q_emb @ d_emb.T) if d_emb.size and q_emb.size else 0.0
+        emb_scores[i2] = float(sim)
+    return emb_doc_ids, emb_scores
+
+
+def _fuse_and_sort_scores(cand_indices: np.ndarray,
+                          sims: np.ndarray,
+                          emb_doc_ids: np.ndarray,
+                          emb_scores: np.ndarray,
+                          rerank_mode: str,
+                          alpha: float) -> Tuple[np.ndarray, np.ndarray]:
+    tfidf_scores = sims[cand_indices]
+    if rerank_mode == "embed":
+        fused = emb_scores
+    elif rerank_mode == "hybrid":
+        fused = alpha * _minmax(tfidf_scores) + (1.0 - alpha) * _minmax(emb_scores)
+    else:
+        fused = tfidf_scores
+    sort_idx = np.argsort(-fused)
+    return cand_indices[sort_idx], fused[sort_idx]
+
+
+def _format_top_results(cand_indices: np.ndarray,
+                        final_scores: np.ndarray,
+                        id_map: Dict[str, Any],
+                        src_root: Path,
+                        topk: int,
+                        tau: float,
+                        exclude_doc_id: Optional[int] = None) -> List[Dict[str, Any]]:
+    results: List[Dict[str, Any]] = []
+    for idx, score in zip(cand_indices, final_scores):
+        if exclude_doc_id is not None and int(idx) == int(exclude_doc_id):
+            continue
+        if float(score) < float(tau):
+            continue
+        meta = id_map[str(int(idx))]
+        results.append({
+            "rank": len(results) + 1,
+            "score": round(float(score), 4),
+            "path": str(Path(src_root) / meta["path"]),
+            "relpath": meta["path"],
+            "title": meta.get("title", ""),
+        })
+        if len(results) >= int(topk):
+            break
+    return results
+
+
+def _prepare_rerank_for_all(index_dir: Path, rerank_mode: str, rerank_model: str) -> Tuple[Optional[Dict[str, Any]], Optional[object]]:
+    if rerank_mode == "none":
+        return None, None
+    pre = _load_precomputed_embeddings(index_dir)
+    model = None
+    model_name = rerank_model
+    use_pre = pre is not None and (not model_name or model_name.strip() == pre["model"])  # noqa: F841
+    if not use_pre:
+        if not model_name:
+            raise SystemExit("--rerank-model is required for --all when no precomputed embeddings are found")
+        try:
+            from sentence_transformers import SentenceTransformer
+        except ImportError:
+            raise SystemExit("sentence-transformers is required for rerank. Install via: pip install sentence-transformers")
+        model = SentenceTransformer(model_name)
+    return pre, model
+
+
+def _prepare_rerank_for_single(index_dir: Path, rerank_mode: str, rerank_model: str) -> Tuple[Optional[Dict[str, Any]], object]:
+    if rerank_mode == "none":
+        return None, None  # type: ignore
+    pre = _load_precomputed_embeddings(index_dir)
+    model_name = rerank_model
+    use_pre = pre is not None and (not model_name or model_name.strip() == pre["model"])  # noqa: F841
+    try:
+        from sentence_transformers import SentenceTransformer
+    except ImportError:
+        raise SystemExit("sentence-transformers is required for rerank. Install via: pip install sentence-transformers")
+    model = SentenceTransformer(pre["model"]) if pre is not None and (not model_name or model_name.strip() == pre["model"]) else (
+        SentenceTransformer(model_name) if model_name else (_ for _ in ()).throw(SystemExit("--rerank-model is required if no precomputed embeddings are found"))
+    )
+    return pre, model
+
+
+def _build_q_emb_from_html(query_html_path: Path,
+                           drop_selectors: List[str],
+                           model,
+                           embed_max_chars: int,
+                           embed_overlap: int) -> np.ndarray:
+    raw_q = query_html_path.read_text(encoding="utf-8", errors="ignore")
+    parts_q = extract_text_from_html(raw_q, drop_selectors)
+    q_text = normalize_text((parts_q["title"] + " ") + (parts_q["headings"] + " ") + parts_q["body"])
+    q_chunks = _chunk_text(q_text, embed_max_chars, embed_overlap)
+    return _embed_texts(model, [t for _, _, t in q_chunks]) if q_chunks else np.zeros((0, 0), dtype=np.float32)
+
+
+def compute_results_for_doc(doc_id: int,
+                            X: sparse.csr_matrix,
+                            id_map: Dict[str, Any],
+                            src_root: Path,
+                            drop_selectors: List[str],
+                            rerank_mode: str,
+                            rerank_topk: int,
+                            topk: int,
+                            embed_max_chars: int,
+                            embed_overlap: int,
+                            alpha: float,
+                            tau: float,
+                            pre: Optional[Dict[str, Any]] = None,
+                            model: Optional[object] = None) -> List[Dict[str, Any]]:
+    qvec = X[doc_id:doc_id+1]
+    sims = cosine_similarity(qvec, X).ravel()
+    sims[int(doc_id)] = -1.0
+    cand_indices = _select_candidates_from_sims(sims, int(topk), int(rerank_topk))
+    if rerank_mode != "none":
+        q_emb = _build_q_emb_for_doc(
+            int(doc_id), pre, model, id_map, src_root, drop_selectors, int(embed_max_chars), int(embed_overlap)
+        )
+        emb_doc_ids, emb_scores = _compute_emb_scores_for_candidates(
+            q_emb, cand_indices, pre, model, id_map, src_root, drop_selectors, int(embed_max_chars), int(embed_overlap), int(doc_id)
+        )
+        cand_indices, final_scores = _fuse_and_sort_scores(cand_indices, sims, emb_doc_ids, emb_scores, str(rerank_mode), float(alpha))
+    else:
+        final_scores = sims[cand_indices]
+    return _format_top_results(cand_indices, final_scores, id_map, src_root, int(topk), float(tau), exclude_doc_id=int(doc_id))
+
+
+def _score_single_query(args,
+                        vectorizer,
+                        X: sparse.csr_matrix,
+                        id_map: Dict[str, Any],
+                        src_root: Path,
+                        drop_selectors: List[str]) -> List[Dict[str, Any]]:
+    qvec = build_query_vector(args.query, drop_selectors, args.title_weight, args.heading_weight, vectorizer)
+    sims = cosine_similarity(qvec, X).ravel()
+    cand_indices = _select_candidates_from_sims(sims, int(args.topk), int(args.rerank_topk))
+    if args.rerank_mode != "none":
+        pre, model = _prepare_rerank_for_single(args.index, args.rerank_mode, args.rerank_model)
+        q_emb = _build_q_emb_from_html(args.query, drop_selectors, model, int(args.embed_max_chars), int(args.embed_overlap))
+        emb_doc_ids, emb_scores = _compute_emb_scores_for_candidates(
+            q_emb, cand_indices, pre, model, id_map, src_root, drop_selectors, int(args.embed_max_chars), int(args.embed_overlap), exclude_doc_id=-1
+        )
+        cand_indices, final_scores = _fuse_and_sort_scores(cand_indices, sims, emb_doc_ids, emb_scores, str(args.rerank_mode), float(args.alpha))
+    else:
+        final_scores = sims[cand_indices]
+    return _format_top_results(cand_indices, final_scores, id_map, src_root, int(args.topk), float(args.tau))
+
+
+def _print_results(results: List[Dict[str, Any]], fmt: str) -> None:
+    if fmt == "json":
+        print(json.dumps(results, ensure_ascii=False, indent=2))
+        return
+    if not results:
+        print("No results above tau. Try lowering --tau.")
+        return
+    colw = {"rank": 4, "score": 6, "relpath": 50, "title": 40}
+    print(f"{'#':>{colw['rank']}}  {'score':>{colw['score']}}  {'relpath':<{colw['relpath']}}  {'title':<{colw['title']}}")
+    print("-" * (sum(colw.values()) + 8))
+    for r in results:
+        print(f"{r['rank']:>{colw['rank']}}  {r['score']:>{colw['score']}.4f}  {r['relpath']:<{colw['relpath']}}  {r['title']:<{colw['title']}}")
+
+
 def main():
     ap = argparse.ArgumentParser(description="Score related HTML files against a query HTML (Japanese)")
     ap.add_argument("--index", type=Path, required=True, help="Index directory from build_index.py")
@@ -152,152 +389,13 @@ def main():
 
     args = ap.parse_args()
     vectorizer, X, id_map, src_root = load_index(args.index)
-
     drop_selectors = [s.strip() for s in args.drop_selectors.split(",") if s.strip()]
-
-    def compute_results_for_doc(doc_id: int,
-                                pre,
-                                model):
-        qvec = X[doc_id:doc_id+1]
-        sims = cosine_similarity(qvec, X).ravel()
-        sims[int(doc_id)] = -1.0
-        order = np.argsort(-sims)
-
-        cand_k = max(args.rerank_topk, args.topk * 5)
-        cand_indices = order[:cand_k]
-
-        final_scores = None
-
-        if args.rerank_mode != "none":
-            pre_local = pre
-            model_local = model
-
-            emb_scores = None
-            emb_doc_ids = None
-
-            # HNSW fast path removed; proceed with brute-force below
-
-            if emb_scores is None:
-                emb_doc_ids = cand_indices.astype(np.int32)
-                emb_scores = np.zeros(len(emb_doc_ids), dtype=np.float32)
-
-                # Build q_emb
-                if pre_local is not None and int(doc_id) in pre_local["doc_index"]:
-                    s0, e0 = pre_local["doc_index"][int(doc_id)]
-                    q_emb = pre_local["emb"][int(s0):int(e0)]
-                else:
-                    raw_q = (Path(src_root) / id_map[str(int(doc_id))]["path"]).read_text(encoding="utf-8", errors="ignore")
-                    parts_q = extract_text_from_html(raw_q, drop_selectors)
-                    q_text = normalize_text((parts_q["title"] + " ") + (parts_q["headings"] + " ") + parts_q["body"])
-                    q_chunks = _chunk_text(q_text, args.embed_max_chars, args.embed_overlap)
-                    if model_local is None:
-                        try:
-                            from sentence_transformers import SentenceTransformer  # noqa: F401
-                        except ImportError:
-                            raise SystemExit("sentence-transformers is required for rerank. Install via: pip install sentence-transformers")
-                    q_emb = _embed_texts(model_local, [t for _, _, t in q_chunks]) if q_chunks else np.zeros((0, 0), dtype=np.float32)
-
-                if pre_local is not None:
-                    emb_all = pre_local["emb"]
-                    doc_index = pre_local["doc_index"]
-                    for i2, idx in enumerate(emb_doc_ids):
-                        if int(idx) == int(doc_id):
-                            emb_scores[i2] = 0.0
-                            continue
-                        if int(idx) not in doc_index:
-                            emb_scores[i2] = 0.0
-                            continue
-                        s1, e1 = doc_index[int(idx)]
-                        doc_emb = emb_all[int(s1):int(e1)]
-                        sim = np.max(q_emb @ doc_emb.T) if doc_emb.size and q_emb.size else 0.0
-                        emb_scores[i2] = float(sim)
-                else:
-                    for i2, idx in enumerate(emb_doc_ids):
-                        if int(idx) == int(doc_id):
-                            emb_scores[i2] = 0.0
-                            continue
-                        meta2 = id_map[str(int(idx))]
-                        p2 = Path(src_root) / meta2["path"]
-                        raw2 = p2.read_text(encoding="utf-8", errors="ignore")
-                        parts2 = extract_text_from_html(raw2, drop_selectors)
-                        d_text = normalize_text((parts2["title"] + " ") + (parts2["headings"] + " ") + parts2["body"]) 
-                        d_chunks = _chunk_text(d_text, args.embed_max_chars, args.embed_overlap)
-                        if not d_chunks:
-                            emb_scores[i2] = 0.0
-                            continue
-                        d_emb = _embed_texts(model_local, [t for _, _, t in d_chunks])
-                        sim = np.max(q_emb @ d_emb.T) if d_emb.size and q_emb.size else 0.0
-                        emb_scores[i2] = float(sim)
-
-            tfidf_scores = sims[cand_indices]
-            if emb_doc_ids is None or np.array_equal(emb_doc_ids, cand_indices.astype(np.int32)):
-                if args.rerank_mode == "embed":
-                    fused = emb_scores
-                elif args.rerank_mode == "hybrid":
-                    fused = args.alpha * _minmax(tfidf_scores) + (1.0 - args.alpha) * _minmax(emb_scores)
-                else:
-                    fused = tfidf_scores
-                sort_idx = np.argsort(-fused)
-                cand_indices = cand_indices[sort_idx]
-                final_scores = fused[sort_idx]
-            else:
-                tfidf_map = {int(idx): float(sims[int(idx)]) for idx in cand_indices}
-                docs_union = np.array(sorted(set(tfidf_map.keys()) | set(int(d) for d in emb_doc_ids)), dtype=np.int32)
-                tfidf_scores_u = np.array([tfidf_map.get(int(d), 0.0) for d in docs_union], dtype=np.float32)
-                emb_map = {int(d): float(s) for d, s in zip(emb_doc_ids, emb_scores)}
-                emb_scores_u = np.array([emb_map.get(int(d), 0.0) for d in docs_union], dtype=np.float32)
-                if args.rerank_mode == "embed":
-                    fused = emb_scores_u
-                elif args.rerank_mode == "hybrid":
-                    fused = args.alpha * _minmax(tfidf_scores_u) + (1.0 - args.alpha) * _minmax(emb_scores_u)
-                else:
-                    fused = tfidf_scores_u
-                sort_idx = np.argsort(-fused)
-                cand_indices = docs_union[sort_idx]
-                final_scores = fused[sort_idx]
-        else:
-            final_scores = sims[cand_indices]
-
-        results = []
-        for idx, score in zip(cand_indices, final_scores):
-            if int(idx) == int(doc_id):
-                continue
-            if float(score) < args.tau:
-                continue
-            meta = id_map[str(int(idx))]
-            results.append({
-                "rank": len(results) + 1,
-                "score": round(float(score), 4),
-                "path": str(Path(src_root) / meta["path"]),
-                "relpath": meta["path"],
-                "title": meta.get("title", ""),
-            })
-            if len(results) >= args.topk:
-                break
-        return results
 
     if args.all:
         out_dir: Path = args.out_dir
         out_dir.mkdir(parents=True, exist_ok=True)
 
-        pre = None
-        model = None
-
-        if args.rerank_mode != "none":
-            pre = _load_precomputed_embeddings(args.index)
-            model_name = args.rerank_model
-            use_pre = pre is not None and (not model_name or model_name.strip() == pre["model"]) 
-
-            # ANN/HNSW disabled
-
-            if not use_pre:
-                if not model_name:
-                    raise SystemExit("--rerank-model is required for --all when no precomputed embeddings are found")
-                try:
-                    from sentence_transformers import SentenceTransformer
-                except ImportError:
-                    raise SystemExit("sentence-transformers is required for rerank. Install via: pip install sentence-transformers")
-                model = SentenceTransformer(model_name)
+        pre, model = _prepare_rerank_for_all(args.index, args.rerank_mode, args.rerank_model)
 
         for sid in range(len(id_map)):
             meta_q = id_map[str(int(sid))]
@@ -305,142 +403,20 @@ def main():
             out_path = out_dir / rel.with_suffix(".json")
             out_path.parent.mkdir(parents=True, exist_ok=True)
 
-            results = compute_results_for_doc(int(sid), pre, model)
+            results = compute_results_for_doc(
+                int(sid), X, id_map, src_root, drop_selectors,
+                args.rerank_mode, args.rerank_topk, args.topk,
+                args.embed_max_chars, args.embed_overlap, args.alpha, args.tau,
+                pre, model
+            )
             out_path.write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
         return
 
+    # Single query mode
     if not args.query:
         raise SystemExit("--query is required unless --all is specified")
-
-    qvec = build_query_vector(args.query, drop_selectors, args.title_weight, args.heading_weight, vectorizer)
-
-    sims = cosine_similarity(qvec, X).ravel()
-    order = np.argsort(-sims)
-
-    cand_k = max(args.rerank_topk, args.topk * 5)
-    cand_indices = order[:cand_k]
-
-    final_scores = None
-
-    if args.rerank_mode != "none":
-        pre = _load_precomputed_embeddings(args.index)
-        model_name = args.rerank_model
-        use_pre = pre is not None and (not model_name or model_name.strip() == pre["model"])  
-
-        try:
-            from sentence_transformers import SentenceTransformer
-        except ImportError:
-            raise SystemExit("sentence-transformers is required for rerank. Install via: pip install sentence-transformers")
-
-        if use_pre:
-            model = SentenceTransformer(pre["model"])  
-        else:
-            if not model_name:
-                raise SystemExit("--rerank-model is required if no precomputed embeddings are found")
-            model = SentenceTransformer(model_name)
-
-        raw_q = args.query.read_text(encoding="utf-8", errors="ignore")
-        parts_q = extract_text_from_html(raw_q, [s.strip() for s in args.drop_selectors.split(",") if s.strip()])
-        q_text = normalize_text((parts_q["title"] + " ") + (parts_q["headings"] + " ") + parts_q["body"])
-        q_chunks = _chunk_text(q_text, args.embed_max_chars, args.embed_overlap)
-        q_emb = _embed_texts(model, [t for _, _, t in q_chunks])
-
-        # ANN/HNSW disabled
-
-        emb_scores = None
-        emb_doc_ids = None
-
-        # HNSW fast path removed; compute brute-force below
-
-        if emb_scores is None:
-            emb_scores = np.zeros(len(cand_indices), dtype=np.float32)
-            emb_doc_ids = cand_indices.astype(np.int32)
-            if use_pre:
-                emb_all = pre["emb"]
-                doc_index = pre["doc_index"]
-                for i, idx in enumerate(emb_doc_ids):
-                    if int(idx) not in doc_index:
-                        emb_scores[i] = 0.0
-                        continue
-                    s, e = doc_index[int(idx)]
-                    doc_emb = emb_all[int(s):int(e)]
-                    sim = np.max(q_emb @ doc_emb.T) if doc_emb.size and q_emb.size else 0.0
-                    emb_scores[i] = float(sim)
-            else:
-                for i, idx in enumerate(emb_doc_ids):
-                    meta = id_map[str(int(idx))]
-                    p = Path(src_root) / meta["path"]
-                    raw = p.read_text(encoding="utf-8", errors="ignore")
-                    parts = extract_text_from_html(raw, [s.strip() for s in args.drop_selectors.split(",") if s.strip()])
-                    d_text = normalize_text((parts["title"] + " ") + (parts["headings"] + " ") + parts["body"]) 
-                    d_chunks = _chunk_text(d_text, args.embed_max_chars, args.embed_overlap)
-                    if not d_chunks:
-                        emb_scores[i] = 0.0
-                        continue
-                    d_emb = _embed_texts(model, [t for _, _, t in d_chunks])
-                    sim = np.max(q_emb @ d_emb.T) if d_emb.size and q_emb.size else 0.0
-                    emb_scores[i] = float(sim)
-
-        if emb_doc_ids is None or np.array_equal(emb_doc_ids, cand_indices.astype(np.int32)):
-            tfidf_scores = sims[cand_indices]
-            if args.rerank_mode == "embed":
-                fused = emb_scores
-            elif args.rerank_mode == "hybrid":
-                fused = args.alpha * _minmax(tfidf_scores) + (1.0 - args.alpha) * _minmax(emb_scores)
-            else:
-                fused = tfidf_scores
-            sort_idx = np.argsort(-fused)
-            cand_indices = cand_indices[sort_idx]
-            final_scores = fused[sort_idx]
-        else:
-            tfidf_map = {int(idx): float(sims[int(idx)]) for idx in cand_indices}
-            docs_union = np.array(sorted(set(tfidf_map.keys()) | set(int(d) for d in emb_doc_ids)), dtype=np.int32)
-            tfidf_scores = np.array([tfidf_map.get(int(d), 0.0) for d in docs_union], dtype=np.float32)
-            emb_map = {int(d): float(s) for d, s in zip(emb_doc_ids, emb_scores)}
-            emb_scores_u = np.array([emb_map.get(int(d), 0.0) for d in docs_union], dtype=np.float32)
-            if args.rerank_mode == "embed":
-                fused = emb_scores_u
-            elif args.rerank_mode == "hybrid":
-                fused = args.alpha * _minmax(tfidf_scores) + (1.0 - args.alpha) * _minmax(emb_scores_u)
-            else:
-                fused = tfidf_scores
-            sort_idx = np.argsort(-fused)
-            cand_indices = docs_union[sort_idx]
-            final_scores = fused[sort_idx]
-    else:
-        final_scores = sims[cand_indices]
-
-    results = []
-    for rank, (idx, score) in enumerate(zip(cand_indices, final_scores), start=1):
-        meta = id_map[str(int(idx))]
-        if float(score) < args.tau:
-            continue
-        results.append({
-            "rank": len(results) + 1,
-            "score": round(float(score), 4),
-            "path": str(Path(src_root) / meta["path"]),
-            "relpath": meta["path"],
-            "title": meta.get("title", ""),
-        })
-        if len(results) >= args.topk:
-            break
-
-    if args.format == "json":
-        print(json.dumps(results, ensure_ascii=False, indent=2))
-    else:
-        if not results:
-            print("No results above tau. Try lowering --tau.")
-            return
-        colw = {
-            "rank": 4,
-            "score": 6,
-            "relpath": 50,
-            "title": 40,
-        }
-        print(f"{'#':>{colw['rank']}}  {'score':>{colw['score']}}  {'relpath':<{colw['relpath']}}  {'title':<{colw['title']}}")
-        print("-" * (sum(colw.values()) + 8))
-        for r in results:
-            print(f"{r['rank']:>{colw['rank']}}  {r['score']:>{colw['score']}.4f}  {r['relpath']:<{colw['relpath']}}  {r['title']:<{colw['title']}}")
+    results = _score_single_query(args, vectorizer, X, id_map, src_root, drop_selectors)
+    _print_results(results, args.format)
 
 
 if __name__ == "__main__":
