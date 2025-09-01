@@ -91,3 +91,9 @@ python score_related.py \
 
 必要なら、サイト構造に合わせて `--drop-selectors` や重み、ngram など調整してください。
 他にも「相互リンク優先」や「埋め込みで再ランク」などの拡張も入れられます。
+
+---
+
+## ライセンス
+
+MIT License
