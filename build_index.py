@@ -10,12 +10,13 @@ import re
 import hashlib
 import unicodedata
 from pathlib import Path
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Tuple
 
 import joblib
 from bs4 import BeautifulSoup
 from sklearn.feature_extraction.text import TfidfVectorizer
 from scipy import sparse
+import numpy as np
 
 
 def normalize_text(s: str) -> str:
@@ -65,12 +66,36 @@ def extract_text_from_html(html: str, drop_selectors: List[str]) -> Dict[str, st
     }
 
 
+def _chunk_text(text: str, max_chars: int, overlap: int) -> List[Tuple[int, int, str]]:
+    """Split text into overlapping character chunks.
+    Returns list of tuples: (start_index, end_index, chunk_text)
+    """
+    if max_chars <= 0:
+        return [(0, len(text), text)]
+    n = len(text)
+    if n <= max_chars:
+        return [(0, n, text)]
+    chunks: List[Tuple[int, int, str]] = []
+    start = 0
+    step = max(1, max_chars - max(0, overlap))
+    while start < n:
+        end = min(n, start + max_chars)
+        chunks.append((start, end, text[start:end]))
+        if end >= n:
+            break
+        start = end - max(0, overlap)
+    return chunks
+
+
 def build_index(src_dir: Path, out_dir: Path, ngram: int, min_df: int, max_df: float,
-                title_weight: int, heading_weight: int, drop_selectors: List[str]) -> None:
+                title_weight: int, heading_weight: int, drop_selectors: List[str],
+                embed_model: str = "", embed_max_chars: int = 800, embed_overlap: int = 200,
+                embed_batch_size: int = 32) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     doc_infos: List[Dict[str, Any]] = []
     corpus: List[str] = []
+    embed_texts: List[str] = []
 
     html_files = sorted([p for p in src_dir.rglob("*.html")])
     if not html_files:
@@ -89,6 +114,7 @@ def build_index(src_dir: Path, out_dir: Path, ngram: int, min_df: int, max_df: f
 
         text_norm = normalize_text(weighted_text)
         body_norm = normalize_text(parts["body"])  # ハッシュは本文ベース
+        embed_text = normalize_text((parts["title"] + " ") + (parts["headings"] + " ") + parts["body"])  # 埋め込み用
         content_hash = hashlib.sha1(body_norm.encode("utf-8")).hexdigest()
 
         relpath = str(p.relative_to(src_dir))
@@ -99,6 +125,7 @@ def build_index(src_dir: Path, out_dir: Path, ngram: int, min_df: int, max_df: f
             "hash": content_hash,
         })
         corpus.append(text_norm)
+        embed_texts.append(embed_text)
 
     # 文字 n-gram TF-IDF
     vectorizer = TfidfVectorizer(
@@ -129,6 +156,63 @@ def build_index(src_dir: Path, out_dir: Path, ngram: int, min_df: int, max_df: f
 
     print(f"Indexed {len(doc_infos)} HTML files → {out_dir}")
 
+    # 任意: 事前埋め込みの計算（外部API不使用。ローカル/指定モデルのみ）
+    if embed_model:
+        try:
+            from sentence_transformers import SentenceTransformer
+        except ImportError:
+            raise SystemExit("sentence-transformers is required for --embed-model. Install via: pip install sentence-transformers")
+
+        model = SentenceTransformer(embed_model)
+
+        # 文書をチャンク化してまとめて埋め込み
+        all_chunk_texts: List[str] = []
+        all_chunk_meta: List[Dict[str, Any]] = []
+        doc_chunk_index: Dict[str, List[int]] = {}
+
+        for doc_id, text in enumerate(embed_texts):
+            start_idx = len(all_chunk_texts)
+            chunks = _chunk_text(text, embed_max_chars, embed_overlap)
+            for s, e, t in chunks:
+                all_chunk_texts.append(t)
+                all_chunk_meta.append({
+                    "doc_id": doc_id,
+                    "relpath": doc_infos[doc_id]["path"],
+                    "title": doc_infos[doc_id].get("title", ""),
+                    "start": s,
+                    "end": e,
+                })
+            end_idx = len(all_chunk_texts)
+            doc_chunk_index[str(doc_id)] = [start_idx, end_idx]
+
+        if not all_chunk_texts:
+            return
+
+        emb = model.encode(
+            all_chunk_texts,
+            batch_size=embed_batch_size,
+            convert_to_numpy=True,
+            normalize_embeddings=True,
+            show_progress_bar=False,
+        )
+        if emb.dtype != np.float32:
+            emb = emb.astype(np.float32)
+
+        np.save(out_dir / "embeddings.npy", emb)
+        (out_dir / "emb_chunks.jsonl").write_text(
+            "\n".join(
+                json.dumps({"chunk_id": i, **all_chunk_meta[i]}, ensure_ascii=False)
+                for i in range(len(all_chunk_meta))
+            ),
+            encoding="utf-8",
+        )
+        (out_dir / "emb_doc_index.json").write_text(
+            json.dumps(doc_chunk_index, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        (out_dir / "emb_model.txt").write_text(str(embed_model), encoding="utf-8")
+        print(f"Precomputed embeddings for {len(all_chunk_texts)} chunks using {embed_model}")
+
 
 def main():
     ap = argparse.ArgumentParser(description="Build TF-IDF index from HTML files (Japanese)")
@@ -139,6 +223,11 @@ def main():
     ap.add_argument("--max-df", type=float, default=0.95, help="max_df for TF-IDF (default: 0.95)")
     ap.add_argument("--title-weight", type=int, default=3, help="title weight (default: 3)")
     ap.add_argument("--heading-weight", type=int, default=2, help="headings weight (default: 2)")
+    # 事前埋め込み関連（任意）
+    ap.add_argument("--embed-model", type=str, default="", help="Sentence-Transformers model name or local path to precompute embeddings (optional)")
+    ap.add_argument("--embed-max-chars", type=int, default=800, help="Max characters per chunk for embeddings (default: 800)")
+    ap.add_argument("--embed-overlap", type=int, default=200, help="Overlap characters between chunks (default: 200)")
+    ap.add_argument("--embed-batch-size", type=int, default=32, help="Batch size for embedding encoding (default: 32)")
     ap.add_argument(
         "--drop-selectors",
         type=str,
@@ -158,6 +247,10 @@ def main():
         title_weight=args.title_weight,
         heading_weight=args.heading_weight,
         drop_selectors=drop_selectors,
+        embed_model=args.embed_model,
+        embed_max_chars=args.embed_max_chars,
+        embed_overlap=args.embed_overlap,
+        embed_batch_size=args.embed_batch_size,
     )
 
 
