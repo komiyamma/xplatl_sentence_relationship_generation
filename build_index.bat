@@ -14,11 +14,5 @@ python "%ROOT%build_index.py" ^
   --embed-model "%ROOT%.models\sentence-bert-base-ja-mean-tokens-v2" ^
   --embed-max-chars 800 ^
   --embed-overlap 200 ^
-  --embed-batch-size 32 ^
-  --build-hnsw ^
-  --hnsw-M 32 ^
-  --hnsw-efC 200 ^
-  --hnsw-efS 128 ^
-  --hnsw-threads 0
-
+  --embed-batch-size 32
 endlocal

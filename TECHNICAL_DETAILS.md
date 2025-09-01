@@ -124,10 +124,7 @@ E5 系（`intfloat/multilingual-e5-*`）は検索用途に強力ですが、英�
 
 - インデックス生成は時間がかかっても良い前提に合わせ、埋め込みを事前計算して保存します。
 - 検索時は、TF‑IDF 類似度で絞り込んだ上位Kに対してのみ埋め込みスコアを評価（プリコンピュートありなら高速）。
-- 必要に応じて ANN（HNSW/FAISS）の導入も可能です。
-- 実装済: HNSWlib によるチャンク埋め込みのANNインデックスを構築・保存（`--build-hnsw`）。
-  - 生成物: `emb_hnsw.bin` と `emb_hnsw_meta.json`
-  - 検索時は `score_related.py` が自動検出（`--ann-mode auto`既定）。`--ann-mode hnsw`で強制使用、`--ann-mode none`で無効化可能。
+  
 
 ---
 
@@ -166,3 +163,45 @@ python score_related.py \
   --rerank-mode embed --rerank-topk 200 \
   --rerank-model ./.models/sentence-bert-base-ja-mean-tokens-v2
 ```
+
+---
+
+## 10. 一括出力モード（`--all`）の仕様
+
+目的: コーパス全体の各ページをクエリとして評価し、「そのページ以外」の上位関連ページを静的JSONとして出力する。
+
+処理の流れ（概要）:
+- 事前に `index/` をロード（`X`: TF‑IDF疎行列、`id_map`: 文書メタ、`source_root.txt`）。
+- ループで全 `doc_id` について実行:
+  - TF‑IDFクエリ `qvec` は `X[doc_id:doc_id+1]`（すなわち当該文書の行）を使用。
+  - コサイン類似度 `sims = cosine_similarity(qvec, X).ravel()` を計算。
+  - 自己文書は除外のため `sims[doc_id] = -1.0`。
+  - 上位 `rerank_topk` を候補集合（`cand_indices`）に選定。
+  - リランクを有効にしている場合:
+    - 事前埋め込みが存在すればそれを使用（`embeddings.npy`, `emb_doc_index.json`）。
+    
+    - 事前埋め込みが無い場合、ローカルモデルを1回だけロードして使い回し、クエリ/候補の埋め込みをオンザフライで計算。
+    - `embed`: 埋め込みスコアでソート。`hybrid`: `alpha*minmax(tfidf) + (1-alpha)*minmax(embed)` をソート。
+  - しきい値 `tau` 未満を除外し、`topk` 件に整形。
+  - JSONを `--out-dir` 配下に、元HTMLの相対パスを保った `*.json` として保存。
+
+出力形式（1ファイルあたりの配列要素）:
+```json
+{
+  "rank": 1,
+  "score": 0.8421,
+  "path": "<絶対パスまたはroot結合>",
+  "relpath": "<htmlからの相対パス>",
+  "title": "<ページタイトル>"
+}
+```
+
+実装メモ・最適化:
+- クエリの TF‑IDF ベクトル再計算を避けるため、各行をそのまま流用（`X[doc_id]`）。これによりタイトル/見出しの重みは「インデックス作成時」に固定される。
+- 事前埋め込みがある場合はモデルをロードせずに再利用し、高速化。
+- 事前埋め込みが無い場合でも、モデルは1回だけロードして全反復で使い回す。
+  
+- メモリ・時間のトレードオフは `rerank_topk`, `topk`, `tau` で調整可能。
+
+互換性とスコアの一貫性:
+- 単一クエリ経路（`--query`）では、実行時の `--title-weight`, `--heading-weight` でクエリを構築する。一方 `--all` ではインデックス行を流用するため、両者の重みが異なる設定だとスコアが若干異なる場合がある。必要に応じて、インデックス構築時と実行時で重みを揃えること。

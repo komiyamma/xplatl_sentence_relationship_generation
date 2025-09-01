@@ -90,9 +90,7 @@ def _chunk_text(text: str, max_chars: int, overlap: int) -> List[Tuple[int, int,
 def build_index(src_dir: Path, out_dir: Path, ngram: int, min_df: int, max_df: float,
                 title_weight: int, heading_weight: int, drop_selectors: List[str],
                 embed_model: str = "", embed_max_chars: int = 800, embed_overlap: int = 200,
-                embed_batch_size: int = 32,
-                build_hnsw: bool = False, hnsw_M: int = 32, hnsw_efC: int = 200, hnsw_efS: int = 128,
-                hnsw_threads: int = 0) -> None:
+                embed_batch_size: int = 32) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     doc_infos: List[Dict[str, Any]] = []
@@ -215,34 +213,7 @@ def build_index(src_dir: Path, out_dir: Path, ngram: int, min_df: int, max_df: f
         (out_dir / "emb_model.txt").write_text(str(embed_model), encoding="utf-8")
         print(f"Precomputed embeddings for {len(all_chunk_texts)} chunks using {embed_model}")
 
-        # Optional: Build HNSW index over chunk embeddings
-        if build_hnsw:
-            try:
-                import hnswlib  # type: ignore
-            except ImportError:
-                raise SystemExit("hnswlib is required for --build-hnsw. Install via: pip install hnswlib")
-
-            dim = int(emb.shape[1])
-            num = int(emb.shape[0])
-            idx = hnswlib.Index(space='cosine', dim=dim)
-            idx.init_index(max_elements=num, ef_construction=int(hnsw_efC), M=int(hnsw_M))
-            threads = int(hnsw_threads) if int(hnsw_threads) > 0 else (os.cpu_count() or 1)
-            idx.add_items(emb, np.arange(num), num_threads=threads)
-            idx.set_ef(int(hnsw_efS))
-            idx.save_index(str(out_dir / "emb_hnsw.bin"))
-            (out_dir / "emb_hnsw_meta.json").write_text(
-                json.dumps({
-                    "space": "cosine",
-                    "dim": dim,
-                    "num_elements": num,
-                    "M": int(hnsw_M),
-                    "ef_construction": int(hnsw_efC),
-                    "ef_search_default": int(hnsw_efS),
-                    "threads": threads,
-                }, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-            print(f"Built HNSW index over {num} chunks → {out_dir / 'emb_hnsw.bin'}")
+        # HNSW support removed
 
 
 def main():
@@ -259,12 +230,7 @@ def main():
     ap.add_argument("--embed-max-chars", type=int, default=800, help="Max characters per chunk for embeddings (default: 800)")
     ap.add_argument("--embed-overlap", type=int, default=200, help="Overlap characters between chunks (default: 200)")
     ap.add_argument("--embed-batch-size", type=int, default=32, help="Batch size for embedding encoding (default: 32)")
-    # ANN(HNSW) optional build
-    ap.add_argument("--build-hnsw", action="store_true", help="Build HNSW index over precomputed embeddings (optional)")
-    ap.add_argument("--hnsw-M", type=int, default=32, help="HNSW: number of bi-directional links (M)")
-    ap.add_argument("--hnsw-efC", type=int, default=200, help="HNSW: efConstruction")
-    ap.add_argument("--hnsw-efS", type=int, default=128, help="HNSW: default efSearch to store in meta")
-    ap.add_argument("--hnsw-threads", type=int, default=0, help="HNSW: threads for add_items (0=auto)")
+    # HNSW options removed
     ap.add_argument(
         "--drop-selectors",
         type=str,
@@ -288,11 +254,6 @@ def main():
         embed_max_chars=args.embed_max_chars,
         embed_overlap=args.embed_overlap,
         embed_batch_size=args.embed_batch_size,
-        build_hnsw=args.build_hnsw,
-        hnsw_M=args.hnsw_M,
-        hnsw_efC=args.hnsw_efC,
-        hnsw_efS=args.hnsw_efS,
-        hnsw_threads=args.hnsw_threads,
     )
 
 

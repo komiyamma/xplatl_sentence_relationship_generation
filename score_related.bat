@@ -13,14 +13,7 @@ REM Prefer precomputed embeddings if present; otherwise require local model
 set "RERANK_MODE=hybrid"
 set "RERANK_ARGS=--rerank-mode %RERANK_MODE% --rerank-topk 200 --alpha 0.5"
 
-REM Prefer HNSW ANN if index exists; otherwise fall back to auto/TF-IDF-only
-set "ANN_ARGS=--ann-mode auto"
-if exist "%INDEX%\emb_hnsw.bin" (
-  echo Using HNSW index under "%INDEX%".
-  set "ANN_ARGS=--ann-mode hnsw --hnsw-ef 256 --ann-topk-mult 5"
-) else (
-  echo No HNSW index found; continuing without ANN acceleration.
-)
+REM ANN/HNSW disabled
 
 if exist "%INDEX%\embeddings.npy" (
   echo Using precomputed embeddings under "%INDEX%".
@@ -38,7 +31,6 @@ python "%ROOT%score_related.py" ^
   --query "%QUERY%" ^
   --topk 30 ^
   --tau 0.05 ^
-  %RERANK_ARGS% ^
-  %ANN_ARGS%
+  %RERANK_ARGS%
 
 endlocal

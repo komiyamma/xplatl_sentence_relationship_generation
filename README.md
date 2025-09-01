@@ -12,8 +12,6 @@ HTMLファイル群からインデックスを構築し、ある1枚のHTML（A.
 pip install beautifulsoup4 lxml scikit-learn scipy joblib
 # リランク + 日本語SBERT用トークナイザ（ローカルにモデルを置いてパス指定する想定）
 pip install sentence-transformers fugashi unidic-lite
-# ANN(HNSW) を使う場合（任意）
-pip install hnswlib
 ```
 
 - BeautifulSoup + lxml: HTML抽出
@@ -58,8 +56,6 @@ python build_index.py \
   --embed-overlap 200 \
   --embed-batch-size 32
 
-# HNSWインデックスも構築（任意）
-  --build-hnsw --hnsw-M 32 --hnsw-efC 200 --hnsw-efS 128
 ```
 
 > `--embed-model` はモデル名またはローカルパス。外部ダウンロードを避ける場合はローカルパスを指定してください。純日本語コーパス中心なら `sonoisa/sentence-bert-base-ja-mean-tokens-v2` を推奨します（例のようにローカル配置してパス指定）。
@@ -119,9 +115,7 @@ python build_index.py \
   - `emb_chunks.jsonl`（チャンクのメタ情報）
   - `emb_doc_index.json`（文書ID→チャンク範囲）
   - `emb_model.txt`（使用モデル名/パス）
-  - HNSWを有効にした場合:
-    - `emb_hnsw.bin`（HNSWlibインデックス）
-    - `emb_hnsw_meta.json`（HNSWメタ情報: 次元やM/efなど）
+  
 
 ---
 
@@ -171,10 +165,48 @@ python score_related.py \
 - `--rerank-topk`: TF‑IDFの上位Kをリランク対象に
 - `--alpha`: ハイブリッドの重み（`alpha*TFIDF + (1-alpha)*Embedding`）
 - `--embed-max-chars`, `--embed-overlap`: チャンク分割設定
- - ANN関連（自動認識）:
-   - `--ann-mode`: `auto`/`none`/`hnsw`（既定`auto`。`emb_hnsw.bin`があれば自動で使用）
-   - `--hnsw-ef`: 検索時efSearchの上書き（省略時は保存済み既定値）
-   - `--ann-topk-mult`: ANNで取得するチャンク近傍数の倍率
+
+### 全件バッチ出力（静的JSON生成）: `--all`
+
+`html` 配下のすべてのHTMLをクエリとして扱い、各ページについて「そのページ以外」との関係上位を JSON に静的書き出しします。モデルは可能な限り1回だけロードして使い回すため、バッチ運用に向きます。
+
+出力先は `--out-dir`（既定: `./json`）。元HTMLの相対パス構造を保ったまま `*.json`（同名置換）で保存します。
+
+- TF‑IDFのみ（高速）
+
+```bash
+python score_related.py \
+  --index ./index \
+  --all \
+  --out-dir ./json \
+  --topk 30 --tau 0.05
+```
+
+- ハイブリッド（事前埋め込みあり推奨）
+
+```bash
+python score_related.py \
+  --index ./index \
+  --all --out-dir ./json \
+  --topk 30 --tau 0.05 \
+  --rerank-mode hybrid --rerank-topk 200 --alpha 0.5
+```
+
+- 事前埋め込みが無い場合（オンザフライでモデル1回ロード）
+
+```bash
+python score_related.py \
+  --index ./index \
+  --all --out-dir ./json \
+  --topk 30 --tau 0.05 \
+  --rerank-mode hybrid --rerank-topk 200 --alpha 0.5 \
+  --rerank-model ./.models/sentence-bert-base-ja-mean-tokens-v2
+```
+
+注意点:
+- `--all` のTF‑IDFクエリは、インデックス行列 `X` の各行（文書ベクトル）をそのまま利用します。よってタイトル/見出しの重みは「インデックス構築時の値」に従います（実行時に `--title-weight` 等を変えても反映されません）。
+- 単一クエリ実行（`--query`）は実行時の重みでクエリを構築するため、`--all` とスコアがわずかに異なる場合があります。揃えたい場合は、インデックス構築時の重みと一致させてください。
+- JSONは `.gitignore` で除外済みです（`json/*`）。バージョン管理したい場合は適宜 `.gitignore` を調整してください。
 
 ---
 
