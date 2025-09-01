@@ -5,7 +5,7 @@ set "INDEX=%ROOT%index"
 
 REM NOTE: Set QUERY to an existing HTML file path.
 REM If your path contains non-ASCII characters, edit this in an editor that preserves Shift-JIS.
-set "QUERY=%ROOT%html\page-bushou-êDìcêMí∑.html"
+set "QUERY=%ROOT%html\ABC.html"
 
 set "MODEL=%ROOT%.models\sentence-bert-base-ja-mean-tokens-v2"
 
@@ -36,7 +36,7 @@ if exist "%INDEX%\embeddings.npy" (
 python "%ROOT%score_related.py" ^
   --index "%INDEX%" ^
   --query "%QUERY%" ^
-  --topk 10 ^
+  --topk 30 ^
   --tau 0.05 ^
   %RERANK_ARGS% ^
   %ANN_ARGS%

@@ -50,3 +50,8 @@ logs/
 
 # Local models (Hugging Face etc.)
 /.models/
+
+/.gemini/
+/.codex/
+
+codex.config.json
