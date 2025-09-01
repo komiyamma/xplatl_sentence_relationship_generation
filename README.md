@@ -1,3 +1,5 @@
+[![GitHub release (latest by date)](https://img.shields.io/github/v/release/komiyamma/xplatl_sentence_relationship_generation)](https://github.com/komiyamma/xplatl_sentence_relationship_generation/releases/latest) [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+
 # 日本語HTMLコーパスの関連ページ推定（TF‑IDF + 埋め込みリランク）
 
 HTMLファイル群からインデックスを構築し、ある1枚のHTML（A.html）に関連する他HTMLをランキングします。基本は文字3‑gramのTF‑IDF + コサイン類似度。任意で Sentence-Transformers による「埋め込みリランク（再ランキング）」を使えます。外部APIには依存せず、ローカルモデル/ファイルのみで動作します。戦国時代テーマの日本語に最適化するため、埋め込みは日本語特化モデルの使用を推奨します。
@@ -18,9 +20,7 @@ pip install sentence-transformers fugashi unidic-lite
 - joblib: ベクトライザの保存
 - sentence-transformers: 埋め込み（任意）
 - fugashi + unidic-lite: 日本語トークナイザ（`sentence-bert-base-ja-mean-tokens-v2` で必須）
-
-注意（Windowsでビルドが失敗する場合）
-- `scipy` や `scikit-learn` のインストールが失敗する場合は、公式のプリビルトホイールがある Python バージョン（例: 3.10/3.11）を使用してください。
+- 作者自身は、`Windows`の`python 3.13`にて動作を確認しています。
 
 ---
 
