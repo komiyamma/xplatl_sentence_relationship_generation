@@ -94,6 +94,12 @@ python score_related.py \
 
 ---
 
+## 技術補足
+
+[TECHNICAL_DETAILS.md](TECHNICAL_DETAILS.md)
+
+---
+
 ## ライセンス
 
 MIT License
