@@ -8,8 +8,8 @@ HTMLファイル群からインデックスを構築し、ある1枚のHTML（A.
 
 ```bash
 pip install beautifulsoup4 lxml scikit-learn scipy joblib
-# リランクを使う場合（ローカルにモデルを置いてパス指定も可能）
-pip install sentence-transformers
+# リランク + 日本語SBERT用トークナイザ（ローカルにモデルを置いてパス指定する想定）
+pip install sentence-transformers fugashi unidic-lite
 ```
 
 - BeautifulSoup + lxml: HTML抽出
@@ -17,6 +17,10 @@ pip install sentence-transformers
 - scipy: 疎行列の保存
 - joblib: ベクトライザの保存
 - sentence-transformers: 埋め込み（任意）
+- fugashi + unidic-lite: 日本語トークナイザ（`sentence-bert-base-ja-mean-tokens-v2` で必須）
+
+注意（Windowsでビルドが失敗する場合）
+- `scipy` や `scikit-learn` のインストールが失敗する場合は、公式のプリビルトホイールがある Python バージョン（例: 3.10/3.11）を使用してください。
 
 ---
 
@@ -69,6 +73,35 @@ python build_index.py \
   - モデルページから一式をダウンロードして `./.models/sentence-bert-base-ja-mean-tokens-v2` に展開
 
 中身の目安: `config.json`, `modules.json`, `pytorch_model.bin`（または `model.safetensors`）, `tokenizer.json`/`vocab.txt`, `tokenizer_config.json`, `special_tokens_map.json`, `1_Pooling/config.json` などが含まれていればOKです。
+
+---
+
+## 実行手順（まとめ）
+
+1) 依存をインストール（上記の pip コマンド2行）
+2) 日本語モデルをローカル配置（上記の「モデルのローカル配置」）
+3) インデックス構築
+   - バッチ: `build_index.bat`
+   - もしくはコマンド例（上記の「使い方」セクション）
+4) 検索（リランク推奨）
+   - バッチ: `score_related.bat`（`QUERY` を実在HTMLに合わせて変更可）
+   - またはコマンド例（プリコンピュート利用/オンザフライ）
+
+---
+
+## よくあるエラーと対処
+
+- ModuleNotFoundError: The unidic_lite dictionary is not installed
+  - 対処: `pip install fugashi unidic-lite`
+
+- `--rerank-model is required if no precomputed embeddings are found`
+  - 対処: 事前埋め込みを作る（`build_index.bat` 実行）か、`score_related.py` 実行時に `--rerank-model ./.models/sentence-bert-base-ja-mean-tokens-v2` を指定
+
+- FileNotFoundError: `./html/A.html`
+  - 対処: 実在するHTMLファイルを指定（例: `--query "./html/page-bushou-....html"`）。`score_related.bat` の `QUERY` を編集しても可。
+
+- モデルが見つからない（Path ... not found）
+  - 対処: モデルのローカルパスが正しいか、`%CD%`（実行カレント）に依存していないか確認。付属バッチは `%~dp0` ベースで動きます。
 
 生成物（`index/`）
 
