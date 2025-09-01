@@ -48,3 +48,5 @@ logs/
 /html/
 /index/
 
+# Local models (Hugging Face etc.)
+/.models/
