@@ -12,6 +12,8 @@ HTMLファイル群からインデックスを構築し、ある1枚のHTML（A.
 pip install beautifulsoup4 lxml scikit-learn scipy joblib
 # リランク + 日本語SBERT用トークナイザ（ローカルにモデルを置いてパス指定する想定）
 pip install sentence-transformers fugashi unidic-lite
+# ANN(HNSW) を使う場合（任意）
+pip install hnswlib
 ```
 
 - BeautifulSoup + lxml: HTML抽出
@@ -55,6 +57,9 @@ python build_index.py \
   --embed-max-chars 800 \
   --embed-overlap 200 \
   --embed-batch-size 32
+
+# HNSWインデックスも構築（任意）
+  --build-hnsw --hnsw-M 32 --hnsw-efC 200 --hnsw-efS 128
 ```
 
 > `--embed-model` はモデル名またはローカルパス。外部ダウンロードを避ける場合はローカルパスを指定してください。純日本語コーパス中心なら `sonoisa/sentence-bert-base-ja-mean-tokens-v2` を推奨します（例のようにローカル配置してパス指定）。
@@ -110,10 +115,13 @@ python build_index.py \
 - `id_map.json` / `docs.jsonl`（メタ情報: 相対パス・タイトル等）
 - `source_root.txt`（ソースのルートパス）
 - 埋め込みを有効にした場合:
-  - `embeddings.npy`（全チャンクの埋め込み行列; float32, L2正規化済）
+ - `embeddings.npy`（全チャンクの埋め込み行列; float32, L2正規化済）
   - `emb_chunks.jsonl`（チャンクのメタ情報）
   - `emb_doc_index.json`（文書ID→チャンク範囲）
   - `emb_model.txt`（使用モデル名/パス）
+  - HNSWを有効にした場合:
+    - `emb_hnsw.bin`（HNSWlibインデックス）
+    - `emb_hnsw_meta.json`（HNSWメタ情報: 次元やM/efなど）
 
 ---
 
@@ -163,6 +171,10 @@ python score_related.py \
 - `--rerank-topk`: TF‑IDFの上位Kをリランク対象に
 - `--alpha`: ハイブリッドの重み（`alpha*TFIDF + (1-alpha)*Embedding`）
 - `--embed-max-chars`, `--embed-overlap`: チャンク分割設定
+ - ANN関連（自動認識）:
+   - `--ann-mode`: `auto`/`none`/`hnsw`（既定`auto`。`emb_hnsw.bin`があれば自動で使用）
+   - `--hnsw-ef`: 検索時efSearchの上書き（省略時は保存済み既定値）
+   - `--ann-topk-mult`: ANNで取得するチャンク近傍数の倍率
 
 ---
 

@@ -124,7 +124,10 @@ E5 系（`intfloat/multilingual-e5-*`）は検索用途に強力ですが、英�
 
 - インデックス生成は時間がかかっても良い前提に合わせ、埋め込みを事前計算して保存します。
 - 検索時は、TF‑IDF 類似度で絞り込んだ上位Kに対してのみ埋め込みスコアを評価（プリコンピュートありなら高速）。
-- 必要に応じて ANN（HNSW/FAISS）の導入も可能です（現実装はコサインでの直接スコアリング）。
+- 必要に応じて ANN（HNSW/FAISS）の導入も可能です。
+- 実装済: HNSWlib によるチャンク埋め込みのANNインデックスを構築・保存（`--build-hnsw`）。
+  - 生成物: `emb_hnsw.bin` と `emb_hnsw_meta.json`
+  - 検索時は `score_related.py` が自動検出（`--ann-mode auto`既定）。`--ann-mode hnsw`で強制使用、`--ann-mode none`で無効化可能。
 
 ---
 

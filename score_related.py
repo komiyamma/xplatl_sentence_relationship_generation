@@ -98,6 +98,32 @@ def _load_precomputed_embeddings(index_dir: Path):
     }
 
 
+def _load_hnsw_index(index_dir: Path):
+    """Load HNSW index if present. Returns dict or None.
+    Requires hnswlib installed. Uses cosine space; distances -> cosine distance (1 - sim).
+    """
+    try:
+        import hnswlib  # type: ignore
+    except Exception:
+        return None
+    idx_path = index_dir / "emb_hnsw.bin"
+    meta_path = index_dir / "emb_hnsw_meta.json"
+    doc_index_path = index_dir / "emb_doc_index.json"
+    if not (idx_path.exists() and meta_path.exists() and doc_index_path.exists()):
+        return None
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    hidx = hnswlib.Index(space=str(meta.get("space", "cosine")), dim=int(meta["dim"]))
+    hidx.load_index(str(idx_path))
+    if "ef_search_default" in meta:
+        try:
+            hidx.set_ef(int(meta["ef_search_default"]))
+        except Exception:
+            pass
+    # need doc_index to map chunk -> doc
+    doc_index = json.loads(doc_index_path.read_text(encoding="utf-8"))
+    return {"index": hidx, "meta": meta, "doc_index": {int(k): v for k, v in doc_index.items()}}
+
+
 def _embed_texts(model, texts: List[str], batch_size: int = 32) -> np.ndarray:
     emb = model.encode(
         texts,
@@ -143,6 +169,10 @@ def main():
     ap.add_argument("--alpha", type=float, default=0.5, help="Hybrid weight: alpha*tfidf + (1-alpha)*embed")
     ap.add_argument("--embed-max-chars", type=int, default=800, help="Max characters per chunk for embeddings (default: 800)")
     ap.add_argument("--embed-overlap", type=int, default=200, help="Overlap characters between chunks (default: 200)")
+    # ANN options (auto-detect HNSW if present)
+    ap.add_argument("--ann-mode", type=str, default="auto", choices=["auto", "none", "hnsw"], help="Approximate NN backend usage")
+    ap.add_argument("--hnsw-ef", type=int, default=0, help="Override HNSW efSearch during query (0=use stored)")
+    ap.add_argument("--ann-topk-mult", type=int, default=5, help="Multiplier for ANN chunk neighbors relative to rerank_topk")
 
     args = ap.parse_args()
     vectorizer, X, id_map, src_root = load_index(args.index)
@@ -186,50 +216,111 @@ def main():
         q_chunks = _chunk_text(q_text, args.embed_max_chars, args.embed_overlap)
         q_emb = _embed_texts(model, [t for _, _, t in q_chunks])
 
-        # Compute embedding score per candidate (max over chunk pairs)
-        emb_scores = np.zeros(len(cand_indices), dtype=np.float32)
-        if use_pre:
-            emb_all = pre["emb"]  # shape: (C, D), normalized
-            doc_index = pre["doc_index"]  # doc_id -> [start, end]
-            for i, idx in enumerate(cand_indices):
-                if int(idx) not in doc_index:
-                    emb_scores[i] = 0.0
-                    continue
-                s, e = doc_index[int(idx)]
-                doc_emb = emb_all[s:e]  # (m, D)
-                # cosine between each query chunk and doc chunk -> take max
-                # embeddings are normalized, so dot product is cosine
-                sim = np.max(q_emb @ doc_emb.T) if doc_emb.size and q_emb.size else 0.0
-                emb_scores[i] = float(sim)
-        else:
-            # On-the-fly encode candidate docs
-            for i, idx in enumerate(cand_indices):
-                meta = id_map[str(int(idx))]
-                p = Path(src_root) / meta["path"]
-                raw = p.read_text(encoding="utf-8", errors="ignore")
-                parts = extract_text_from_html(raw, [s.strip() for s in args.drop_selectors.split(",") if s.strip()])
-                d_text = normalize_text((parts["title"] + " ") + (parts["headings"] + " ") + parts["body"]) 
-                d_chunks = _chunk_text(d_text, args.embed_max_chars, args.embed_overlap)
-                if not d_chunks:
-                    emb_scores[i] = 0.0
-                    continue
-                d_emb = _embed_texts(model, [t for _, _, t in d_chunks])
-                sim = np.max(q_emb @ d_emb.T) if d_emb.size and q_emb.size else 0.0
-                emb_scores[i] = float(sim)
+        # Optionally use ANN(HNSW) if available/selected to obtain doc-level embedding scores
+        ann_info = None
+        if args.ann_mode != "none":
+            ann_info = _load_hnsw_index(args.index)
+            if args.ann_mode == "hnsw" and ann_info is None:
+                raise SystemExit("HNSW index not found. Build with build_index.py --build-hnsw")
+
+        emb_scores = None
+        emb_doc_ids = None
+
+        if ann_info is not None and pre is not None:
+            # Build inverse map: chunk_id -> doc_id
+            # pre['doc_index']: dict[int, [start, end)]
+            max_end = max(int(v[1]) for v in pre["doc_index"].values()) if pre["doc_index"] else 0
+            chunk_to_doc = np.empty(max_end, dtype=np.int32)
+            for d_id, (s, e) in pre["doc_index"].items():
+                chunk_to_doc[int(s):int(e)] = int(d_id)
+
+            hidx = ann_info["index"]
+            if int(args.hnsw_ef) > 0:
+                try:
+                    hidx.set_ef(int(args.hnsw_ef))
+                except Exception:
+                    pass
+            # k: request more chunk neighbors than needed and aggregate per doc (take max)
+            k = max(int(args.rerank_topk) * int(args.ann_topk_mult), int(args.topk) * 10)
+            doc_scores: Dict[int, float] = {}
+            for v in q_emb:
+                labels, dists = hidx.knn_query(v, k=k)
+                labs = labels[0]
+                dst = dists[0]
+                # cosine distance -> similarity (avoid shadowing TF-IDF sims)
+                chunk_sims = 1.0 - dst
+                for lab, sim in zip(labs, chunk_sims):
+                    if int(lab) < 0 or int(lab) >= len(chunk_to_doc):
+                        continue
+                    did = int(chunk_to_doc[int(lab)])
+                    prev = doc_scores.get(did, 0.0)
+                    if float(sim) > prev:
+                        doc_scores[did] = float(sim)
+            if doc_scores:
+                emb_doc_ids = np.array(list(doc_scores.keys()), dtype=np.int32)
+                emb_scores = np.array([doc_scores[int(d)] for d in emb_doc_ids], dtype=np.float32)
+
+        if emb_scores is None:
+            # Fallback: direct scoring against candidate docs (original behavior)
+            emb_scores = np.zeros(len(cand_indices), dtype=np.float32)
+            emb_doc_ids = cand_indices.astype(np.int32)
+            if use_pre:
+                emb_all = pre["emb"]  # shape: (C, D), normalized
+                doc_index = pre["doc_index"]  # doc_id -> [start, end]
+                for i, idx in enumerate(emb_doc_ids):
+                    if int(idx) not in doc_index:
+                        emb_scores[i] = 0.0
+                        continue
+                    s, e = doc_index[int(idx)]
+                    doc_emb = emb_all[int(s):int(e)]  # (m, D)
+                    sim = np.max(q_emb @ doc_emb.T) if doc_emb.size and q_emb.size else 0.0
+                    emb_scores[i] = float(sim)
+            else:
+                # On-the-fly encode candidate docs
+                for i, idx in enumerate(emb_doc_ids):
+                    meta = id_map[str(int(idx))]
+                    p = Path(src_root) / meta["path"]
+                    raw = p.read_text(encoding="utf-8", errors="ignore")
+                    parts = extract_text_from_html(raw, [s.strip() for s in args.drop_selectors.split(",") if s.strip()])
+                    d_text = normalize_text((parts["title"] + " ") + (parts["headings"] + " ") + parts["body"]) 
+                    d_chunks = _chunk_text(d_text, args.embed_max_chars, args.embed_overlap)
+                    if not d_chunks:
+                        emb_scores[i] = 0.0
+                        continue
+                    d_emb = _embed_texts(model, [t for _, _, t in d_chunks])
+                    sim = np.max(q_emb @ d_emb.T) if d_emb.size and q_emb.size else 0.0
+                    emb_scores[i] = float(sim)
 
         # Combine with TF-IDF
-        tfidf_scores = sims[cand_indices]
-        if args.rerank_mode == "embed":
-            fused = emb_scores
-        elif args.rerank_mode == "hybrid":
-            fused = args.alpha * _minmax(tfidf_scores) + (1.0 - args.alpha) * _minmax(emb_scores)
+        # Build final doc list depending on rerank mode and source of emb_scores
+        if emb_doc_ids is None or np.array_equal(emb_doc_ids, cand_indices.astype(np.int32)):
+            # Same set as TF-IDF candidates (or no ANN). Keep existing pathway.
+            tfidf_scores = sims[cand_indices]
+            if args.rerank_mode == "embed":
+                fused = emb_scores
+            elif args.rerank_mode == "hybrid":
+                fused = args.alpha * _minmax(tfidf_scores) + (1.0 - args.alpha) * _minmax(emb_scores)
+            else:
+                fused = tfidf_scores
+            sort_idx = np.argsort(-fused)
+            cand_indices = cand_indices[sort_idx]
+            final_scores = fused[sort_idx]
         else:
-            fused = tfidf_scores
-
-        # Sort candidates by fused score
-        sort_idx = np.argsort(-fused)
-        cand_indices = cand_indices[sort_idx]
-        final_scores = fused[sort_idx]
+            # emb_doc_ids are from ANN (union path): fuse with TF-IDF by union of doc IDs
+            tfidf_map = {int(idx): float(sims[int(idx)]) for idx in cand_indices}
+            docs_union = np.array(sorted(set(tfidf_map.keys()) | set(int(d) for d in emb_doc_ids)), dtype=np.int32)
+            tfidf_scores = np.array([tfidf_map.get(int(d), 0.0) for d in docs_union], dtype=np.float32)
+            emb_map = {int(d): float(s) for d, s in zip(emb_doc_ids, emb_scores)}
+            emb_scores_u = np.array([emb_map.get(int(d), 0.0) for d in docs_union], dtype=np.float32)
+            if args.rerank_mode == "embed":
+                fused = emb_scores_u
+            elif args.rerank_mode == "hybrid":
+                fused = args.alpha * _minmax(tfidf_scores) + (1.0 - args.alpha) * _minmax(emb_scores_u)
+            else:
+                fused = tfidf_scores
+            sort_idx = np.argsort(-fused)
+            cand_indices = docs_union[sort_idx]
+            final_scores = fused[sort_idx]
     else:
         final_scores = sims[cand_indices]
 
