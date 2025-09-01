@@ -20,9 +20,7 @@ pip install sentence-transformers fugashi unidic-lite
 - joblib: ベクトライザの保存
 - sentence-transformers: 埋め込み（任意）
 - fugashi + unidic-lite: 日本語トークナイザ（`sentence-bert-base-ja-mean-tokens-v2` で必須）
-
-注意（Windowsでビルドが失敗する場合）
-- `scipy` や `scikit-learn` のインストールが失敗する場合は、公式のプリビルトホイールがある Python バージョン（例: 3.10/3.11）を使用してください。
+- 作者自身は、`Windows`の`python 3.13`にて動作を確認しています。
 
 ---
 
