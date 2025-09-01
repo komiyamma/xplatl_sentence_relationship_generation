@@ -67,8 +67,8 @@ def extract_text_from_html(html: str, drop_selectors: List[str]) -> Dict[str, st
 
 
 def _chunk_text(text: str, max_chars: int, overlap: int) -> List[Tuple[int, int, str]]:
-    """Split text into overlapping character chunks.
-    Returns list of tuples: (start_index, end_index, chunk_text)
+    """テキストを重なり付きでチャンク分割する。
+    戻り値は (開始位置, 終了位置, チャンク文字列) のタプルのリスト。
     """
     if max_chars <= 0:
         return [(0, len(text), text)]
@@ -91,6 +91,16 @@ def build_index(src_dir: Path, out_dir: Path, ngram: int, min_df: int, max_df: f
                 title_weight: int, heading_weight: int, drop_selectors: List[str],
                 embed_model: str = "", embed_max_chars: int = 800, embed_overlap: int = 200,
                 embed_batch_size: int = 32) -> None:
+    """HTMLを走査してTF‑IDFインデックスを構築し、任意で埋め込みを事前計算して保存する。
+
+    引数:
+    - src_dir: HTMLのルートディレクトリ
+    - out_dir: インデックスの出力先ディレクトリ
+    - ngram/min_df/max_df: 文字N‑gramベースのTF‑IDFパラメータ
+    - title_weight/heading_weight: タイトル・見出しの重み
+    - drop_selectors: 除外したいCSSセレクタ（ナビ・フッター等）
+    - embed_model/max_chars/overlap/batch_size: 埋め込み事前計算の設定（任意）
+    """
     out_dir.mkdir(parents=True, exist_ok=True)
 
     doc_infos: List[Dict[str, Any]] = []
@@ -218,8 +228,10 @@ def build_index(src_dir: Path, out_dir: Path, ngram: int, min_df: int, max_df: f
 
 def main():
     ap = argparse.ArgumentParser(description="Build TF-IDF index from HTML files (Japanese)")
+    # 入力・出力の基本設定
     ap.add_argument("--src", type=Path, required=True, help="HTML root directory")
     ap.add_argument("--out", type=Path, required=True, help="Output index directory")
+    # TF‑IDFのパラメータ
     ap.add_argument("--ngram", type=int, default=3, help="character n-gram size (default: 3)")
     ap.add_argument("--min-df", type=int, default=2, help="min_df for TF-IDF (default: 2)")
     ap.add_argument("--max-df", type=float, default=0.95, help="max_df for TF-IDF (default: 0.95)")
@@ -239,8 +251,10 @@ def main():
     )
     args = ap.parse_args()
 
+    # 文字列→リストに整形
     drop_selectors = [s.strip() for s in args.drop_selectors.split(",") if s.strip()]
 
+    # インデックス作成の実行
     build_index(
         src_dir=args.src,
         out_dir=args.out,

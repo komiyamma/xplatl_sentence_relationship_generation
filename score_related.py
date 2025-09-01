@@ -19,6 +19,7 @@ import re
 import unicodedata
 
 def normalize_text(s: str) -> str:
+    """日本語向けの軽い正規化（NFKC・URL除去・空白圧縮）。"""
     s = unicodedata.normalize("NFKC", s)
     s = re.sub(r"https?://\S+", " ", s)
     s = re.sub(r"\s+", " ", s)
@@ -26,6 +27,7 @@ def normalize_text(s: str) -> str:
 
 
 def extract_text_from_html(html: str, drop_selectors: List[str]) -> Dict[str, str]:
+    """HTMLからタイトル・見出し・本文を抽出（指定セレクタは除去）。"""
     try:
         soup = BeautifulSoup(html, "lxml")
     except Exception:
@@ -43,6 +45,7 @@ def extract_text_from_html(html: str, drop_selectors: List[str]) -> Dict[str, st
 
 
 def load_index(index_dir: Path):
+    """build_index.py が出力したインデックス一式を読み込む。"""
     vectorizer = joblib.load(index_dir / "tfidf_vectorizer.pkl")
     X = sparse.load_npz(index_dir / "tfidf_matrix.npz")
     id_map = json.loads((index_dir / "id_map.json").read_text(encoding="utf-8"))
@@ -51,6 +54,7 @@ def load_index(index_dir: Path):
 
 
 def build_query_vector(query_html_path: Path, drop_selectors: List[str], title_weight: int, heading_weight: int, vectorizer) -> sparse.csr_matrix:
+    """単一HTMLファイルからクエリベクトル（TF‑IDF）を構築する。"""
     raw = query_html_path.read_text(encoding="utf-8", errors="ignore")
     parts = extract_text_from_html(raw, drop_selectors)
     weighted_text = (
@@ -63,6 +67,7 @@ def build_query_vector(query_html_path: Path, drop_selectors: List[str], title_w
 
 
 def _chunk_text(text: str, max_chars: int, overlap: int) -> List[Tuple[int, int, str]]:
+    """テキストを重なり付きでチャンク分割する。戻り値は (開始, 終了, 文字列)。"""
     if max_chars <= 0:
         return [(0, len(text), text)]
     n = len(text)
@@ -80,6 +85,7 @@ def _chunk_text(text: str, max_chars: int, overlap: int) -> List[Tuple[int, int,
 
 
 def _load_precomputed_embeddings(index_dir: Path):
+    """インデックス側で事前計算された埋め込みとメタ情報を読み込む。"""
     emb_path = index_dir / "embeddings.npy"
     chunks_path = index_dir / "emb_chunks.jsonl"
     doc_index_path = index_dir / "emb_doc_index.json"
@@ -102,6 +108,7 @@ def _load_precomputed_embeddings(index_dir: Path):
 
 
 def _embed_texts(model, texts: List[str], batch_size: int = 32) -> np.ndarray:
+    """Sentence-Transformers の `encode` をラップ（numpy/正規化込み）。"""
     emb = model.encode(
         texts,
         batch_size=batch_size,
@@ -115,6 +122,7 @@ def _embed_texts(model, texts: List[str], batch_size: int = 32) -> np.ndarray:
 
 
 def _minmax(x: np.ndarray) -> np.ndarray:
+    """配列を min-max 正規化（定数配列はゼロ配列）。"""
     if x.size == 0:
         return x
     mn = float(np.min(x))
@@ -125,6 +133,7 @@ def _minmax(x: np.ndarray) -> np.ndarray:
 
 
 def _select_candidates_from_sims(sims: np.ndarray, topk: int, rerank_topk: int) -> np.ndarray:
+    """TF‑IDF類似度ベクトルから上位候補のインデックスを返す。"""
     order = np.argsort(-sims)
     cand_k = max(int(rerank_topk), int(topk) * 5)
     return order[:cand_k]
@@ -138,6 +147,7 @@ def _build_q_emb_for_doc(doc_id: int,
                          drop_selectors: List[str],
                          embed_max_chars: int,
                          embed_overlap: int) -> np.ndarray:
+    """`--all` 用: 文書IDに対応するクエリのチャンク埋め込みを取得/計算。"""
     if pre is not None and int(doc_id) in pre.get("doc_index", {}):
         s0, e0 = pre["doc_index"][int(doc_id)]
         return pre["emb"][int(s0):int(e0)]
@@ -162,6 +172,7 @@ def _compute_emb_scores_for_candidates(q_emb: np.ndarray,
                                        embed_max_chars: int,
                                        embed_overlap: int,
                                        exclude_doc_id: int) -> Tuple[np.ndarray, np.ndarray]:
+    """候補文書集合に対し、最大チャンク類似（内積）でスコアを計算する。"""
     emb_doc_ids = cand_indices.astype(np.int32)
     emb_scores = np.zeros(len(emb_doc_ids), dtype=np.float32)
 
@@ -212,6 +223,7 @@ def _fuse_and_sort_scores(cand_indices: np.ndarray,
                           emb_scores: np.ndarray,
                           rerank_mode: str,
                           alpha: float) -> Tuple[np.ndarray, np.ndarray]:
+    """TF‑IDFと埋め込みスコアを融合し、降順にソートして返す。"""
     tfidf_scores = sims[cand_indices]
     if rerank_mode == "embed":
         fused = emb_scores
@@ -230,6 +242,7 @@ def _format_top_results(cand_indices: np.ndarray,
                         topk: int,
                         tau: float,
                         exclude_doc_id: Optional[int] = None) -> List[Dict[str, Any]]:
+    """スコアとメタを整形してトップKの結果を返す。"""
     results: List[Dict[str, Any]] = []
     for idx, score in zip(cand_indices, final_scores):
         if exclude_doc_id is not None and int(idx) == int(exclude_doc_id):
@@ -250,6 +263,7 @@ def _format_top_results(cand_indices: np.ndarray,
 
 
 def _prepare_rerank_for_all(index_dir: Path, rerank_mode: str, rerank_model: str) -> Tuple[Optional[Dict[str, Any]], Optional[object]]:
+    """`--all` 用のリランク前準備（プリコンピュートとモデル読み込み）。"""
     if rerank_mode == "none":
         return None, None
     pre = _load_precomputed_embeddings(index_dir)
@@ -268,6 +282,7 @@ def _prepare_rerank_for_all(index_dir: Path, rerank_mode: str, rerank_model: str
 
 
 def _prepare_rerank_for_single(index_dir: Path, rerank_mode: str, rerank_model: str) -> Tuple[Optional[Dict[str, Any]], object]:
+    """単一クエリ用のリランク前準備（プリコンピュート/モデル）。"""
     if rerank_mode == "none":
         return None, None  # type: ignore
     pre = _load_precomputed_embeddings(index_dir)
@@ -288,6 +303,7 @@ def _build_q_emb_from_html(query_html_path: Path,
                            model,
                            embed_max_chars: int,
                            embed_overlap: int) -> np.ndarray:
+    """HTMLからクエリのチャンク埋め込みを生成。"""
     raw_q = query_html_path.read_text(encoding="utf-8", errors="ignore")
     parts_q = extract_text_from_html(raw_q, drop_selectors)
     q_text = normalize_text((parts_q["title"] + " ") + (parts_q["headings"] + " ") + parts_q["body"])
@@ -309,6 +325,7 @@ def compute_results_for_doc(doc_id: int,
                             tau: float,
                             pre: Optional[Dict[str, Any]] = None,
                             model: Optional[object] = None) -> List[Dict[str, Any]]:
+    """`--all` の1ドキュメントに対する検索と整形済み結果の取得。"""
     qvec = X[doc_id:doc_id+1]
     sims = cosine_similarity(qvec, X).ravel()
     sims[int(doc_id)] = -1.0
@@ -332,6 +349,7 @@ def _score_single_query(args,
                         id_map: Dict[str, Any],
                         src_root: Path,
                         drop_selectors: List[str]) -> List[Dict[str, Any]]:
+    """単一クエリ（--query）に対する検索と整形済み結果の取得。"""
     qvec = build_query_vector(args.query, drop_selectors, args.title_weight, args.heading_weight, vectorizer)
     sims = cosine_similarity(qvec, X).ravel()
     cand_indices = _select_candidates_from_sims(sims, int(args.topk), int(args.rerank_topk))
@@ -348,6 +366,7 @@ def _score_single_query(args,
 
 
 def _print_results(results: List[Dict[str, Any]], fmt: str) -> None:
+    """結果を JSON またはテーブルで出力。"""
     if fmt == "json":
         print(json.dumps(results, ensure_ascii=False, indent=2))
         return
