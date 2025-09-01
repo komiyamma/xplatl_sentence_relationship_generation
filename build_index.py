@@ -223,7 +223,6 @@ def build_index(src_dir: Path, out_dir: Path, ngram: int, min_df: int, max_df: f
         (out_dir / "emb_model.txt").write_text(str(embed_model), encoding="utf-8")
         print(f"Precomputed embeddings for {len(all_chunk_texts)} chunks using {embed_model}")
 
-        # HNSW support removed
 
 
 def main():
@@ -242,7 +241,7 @@ def main():
     ap.add_argument("--embed-max-chars", type=int, default=800, help="Max characters per chunk for embeddings (default: 800)")
     ap.add_argument("--embed-overlap", type=int, default=200, help="Overlap characters between chunks (default: 200)")
     ap.add_argument("--embed-batch-size", type=int, default=32, help="Batch size for embedding encoding (default: 32)")
-    # HNSW options removed
+
     ap.add_argument(
         "--drop-selectors",
         type=str,

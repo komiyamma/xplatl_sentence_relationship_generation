@@ -104,9 +104,6 @@ def _load_precomputed_embeddings(index_dir: Path):
     }
 
 
-"""HNSW support removed."""
-
-
 def _embed_texts(model, texts: List[str], batch_size: int = 32) -> np.ndarray:
     """Sentence-Transformers の `encode` をラップ（numpy/正規化込み）。"""
     emb = model.encode(
@@ -404,7 +401,6 @@ def main():
     ap.add_argument("--alpha", type=float, default=0.5, help="Hybrid weight: alpha*tfidf + (1-alpha)*embed")
     ap.add_argument("--embed-max-chars", type=int, default=800, help="Max characters per chunk for embeddings (default: 800)")
     ap.add_argument("--embed-overlap", type=int, default=200, help="Overlap characters between chunks (default: 200)")
-    # ANN/HNSW options removed
 
     args = ap.parse_args()
     vectorizer, X, id_map, src_root = load_index(args.index)
