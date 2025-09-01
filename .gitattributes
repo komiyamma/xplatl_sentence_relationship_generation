@@ -2,4 +2,4 @@
 # （Git はリポジトリ内ではUTF-8として保持し、チェックアウト/コミット時に変換します）
 build_index.bat text eol=crlf working-tree-encoding=CP932
 score_related.bat text eol=crlf working-tree-encoding=CP932
-
+score_related_custom.bat text eol=crlf working-tree-encoding=CP932
