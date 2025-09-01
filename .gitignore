@@ -1,0 +1,50 @@
+# Python bytecode and cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Build and distribution
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Testing and coverage
+.pytest_cache/
+.coverage
+.coverage.*
+.cache/
+htmlcov/
+.tox/
+.nox/
+
+# IDE and editor settings
+.idea/
+.vscode/
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Logs and runtime
+*.log
+logs/
+
+# Environment files
+.env
+.env.*
+
+# Project-specific directories
+/html/
+/index/
+
