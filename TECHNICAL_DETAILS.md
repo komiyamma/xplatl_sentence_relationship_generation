@@ -130,6 +130,8 @@ E5 系（`intfloat/multilingual-e5-*`）は検索用途に強力ですが、英�
 
 ## 9. 代表的な実行例
 
+既定値で素早く動かす用途には、同梱のラッパー `build_index_cli.py` / `score_related_cli.py` / `score_related_custom_cli.py` も利用できます（クロスプラットフォーム）。以下はコマンド引数で柔軟に指定する直叙的な実行例です。
+
 事前埋め込み付きインデックス作成:
 
 ```bash

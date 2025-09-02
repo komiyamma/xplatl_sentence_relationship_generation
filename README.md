@@ -82,10 +82,11 @@ python build_index.py \
 1) 依存をインストール（上記の pip コマンド2行）
 2) 日本語モデルをローカル配置（上記の「モデルのローカル配置」）
 3) インデックス構築
-   - バッチ: `build_index.bat`
+   - スクリプト: `python build_index_cli.py`
    - もしくはコマンド例（上記の「使い方」セクション）
 4) 検索（リランク推奨）
-   - バッチ: `score_related.bat`（`QUERY` を実在HTMLに合わせて変更可）
+   - スクリプト: `python score_related_cli.py`（必要に応じてファイル内のクエリパスを変更）
+   - 全件JSON出力: `python score_related_custom_cli.py`
    - またはコマンド例（プリコンピュート利用/オンザフライ）
 
 ---
@@ -96,13 +97,13 @@ python build_index.py \
   - 対処: `pip install fugashi unidic-lite`
 
 - `--rerank-model is required if no precomputed embeddings are found`
-  - 対処: 事前埋め込みを作る（`build_index.bat` 実行）か、`score_related.py` 実行時に `--rerank-model ./.models/sentence-bert-base-ja-mean-tokens-v2` を指定
+  - 対処: 事前埋め込みを作る（`python build_index_cli.py` 実行）か、`score_related.py` 実行時に `--rerank-model ./.models/sentence-bert-base-ja-mean-tokens-v2` を指定
 
 - FileNotFoundError: `./html/A.html`
-  - 対処: 実在するHTMLファイルを指定（例: `--query "./html/page-bushou-....html"`）。`score_related.bat` の `QUERY` を編集しても可。
+  - 対処: 実在するHTMLファイルを指定（例: `--query "./html/page-bushou-....html"`）。簡便に使う場合は `score_related_cli.py` 内のクエリパスを編集。
 
 - モデルが見つからない（Path ... not found）
-  - 対処: モデルのローカルパスが正しいか、`%CD%`（実行カレント）に依存していないか確認。付属バッチは `%~dp0` ベースで動きます。
+  - 対処: モデルのローカルパスが正しいか、実行カレントに依存していないか確認。付属スクリプトは `Path(__file__).parent` を基準に動作します。
 
 生成物（`index/`）
 

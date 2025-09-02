@@ -57,8 +57,5 @@ logs/
 codex.config.json
 
 # private entry point
-build_index_custom.bat
-score_related_custom.py
-score_related_custom.bat
-score_related_custom.py
+score_related_custom_cli.py
 json/*
