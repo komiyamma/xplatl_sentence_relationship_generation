@@ -23,7 +23,7 @@
     *   **改善案:** `requirements.txt`ファイルを提供して依存関係を一度にインストールできるようにしたり、モデルのダウンロードと配置を自動化するセットアップスクリプト（`setup.py`やシェルスクリプト）を用意したりすることで、導入が容易になります。
 
 3.  **プラットフォーム固有ツールの解消**
-    *   **現状:** 以前は `build_index.bat` や `score_related.bat` といった Windows バッチのみが提供されていましたが、現在はクロスプラットフォームな Python ラッパー（`build_index_cli.py`, `score_related_cli.py`, `score_related_custom_cli.py`）を同梱し、OS依存を解消しました。
+    *   **現状:** 以前は Windows 固有の実行手段のみでしたが、現在はクロスプラットフォームな Python ラッパー（`build_index_cli.py`, `score_related_cli.py`, `score_related_custom_cli.py`）を同梱し、OS依存を解消しました。
     *   **提案（任意）:** 追加で `.sh` スクリプトを用意すると、Python 実行環境を意識せずに叩ける導線も提供できますが、機能面では既に `_cli.py` で十分です。
 
 4.  **スケーラビリティの制限**
