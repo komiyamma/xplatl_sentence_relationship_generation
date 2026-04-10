@@ -85,11 +85,29 @@ python build_index.py \
 2) 日本語モデルをローカル配置（上記の「モデルのローカル配置」）
 3) インデックス構築
    - スクリプト: `python build_index_cli.py`
+   - もっとも簡単な開始手順はこれです。モデルが見つかれば埋め込み込み、見つからなければ TF‑IDF のみで `index/` を構築します。
    - もしくはコマンド例（上記の「使い方」セクション）
 4) 検索（リランク推奨）
-   - スクリプト: `python score_related_cli.py`（必要に応じてファイル内のクエリパスを変更）
+   - スクリプト: `python score_related_cli.py ./html/page-bushou-....html`
    - 全件JSON出力: `python score_related_custom_cli.py`
    - またはコマンド例（プリコンピュート利用/オンザフライ）
+
+### ラッパーを使う最短手順
+
+```bash
+python build_index_cli.py
+python score_related_cli.py ./html/page-bushou-下間真頼.html
+python score_related_custom_cli.py
+```
+
+- `build_index_cli.py`
+  - `html/` → `index/` を既定値で構築
+  - `./.models/sentence-bert-base-ja-mean-tokens-v2` があれば埋め込み事前計算も実施
+  - モデルが無い場合でも TF‑IDF のみで動作
+- `score_related_cli.py`
+  - 単一HTMLを引数で受け取り、関連ページをテーブル表示
+- `score_related_custom_cli.py`
+  - `html/` 配下の全HTMLについて `json/` 配下へ静的JSONを書き出し
 
 ---
 
@@ -102,10 +120,10 @@ python build_index.py \
   - 対処: 事前埋め込みを作る（`python build_index_cli.py` 実行）か、`score_related.py` 実行時に `--rerank-model ./.models/sentence-bert-base-ja-mean-tokens-v2` を指定
 
 - FileNotFoundError: `./html/A.html`
-  - 対処: 実在するHTMLファイルを指定（例: `--query "./html/page-bushou-....html"`）。簡便に使う場合は `score_related_cli.py` 内のクエリパスを編集。
+  - 対処: 実在するHTMLファイルを指定（例: `--query "./html/page-bushou-....html"`、または `python score_related_cli.py ./html/page-bushou-....html`）
 
 - モデルが見つからない（Path ... not found）
-  - 対処: モデルのローカルパスが正しいか、実行カレントに依存していないか確認。付属スクリプトは `Path(__file__).parent` を基準に動作します。
+  - 対処: モデルのローカルパスが正しいか確認。`build_index_cli.py` はモデルが無ければ TF‑IDF のみで続行します。`score_related_cli.py` / `score_related_custom_cli.py` は事前埋め込みが無い場合にローカルモデルを要求します。
 
 生成物（`index/`）
 

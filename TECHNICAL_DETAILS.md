@@ -63,6 +63,7 @@
 - `tfidf_matrix.npz`: TF‑IDF 疎行列
 - `docs.jsonl`: 文書メタ（`path`, `title`, `length`, `hash`）
 - `id_map.json`: 行番号→文書メタのマップ
+- `doc_profiles.json`: カテゴリ、表示名、正規化名、括弧内識別子、文脈語
 - `source_root.txt`: 元HTMLルート
 
 ---
@@ -138,6 +139,7 @@ E5 系（`intfloat/multilingual-e5-*`）は検索用途に強力ですが、英�
 - 重み: `title_weight=3, heading_weight=2`
 - 埋め込み: `embed_max_chars=800, embed_overlap=200`
 - リランク: `rerank_topk=200, alpha=0.5, tau=0.25`
+- 文脈再ランキング: `neighbor_k=20, context_weight=0.18, graph_weight=0.10`
 
 ---
 
@@ -159,6 +161,23 @@ E5 系（`intfloat/multilingual-e5-*`）は検索用途に強力ですが、英�
 ## 9. 代表的な実行例
 
 既定値で素早く動かす用途には、同梱のラッパー `build_index_cli.py` / `score_related_cli.py` / `score_related_custom_cli.py` も利用できます（クロスプラットフォーム）。以下はコマンド引数で柔軟に指定する直叙的な実行例です。
+
+ラッパー運用の基本:
+
+```bash
+python build_index_cli.py
+python score_related_cli.py ./html/page-bushou-下間真頼.html
+python score_related_custom_cli.py
+```
+
+- `build_index_cli.py`
+  - 既定値で `html/` → `index/` を構築
+  - `./.models/sentence-bert-base-ja-mean-tokens-v2` があれば埋め込みも事前計算
+  - モデルが無い場合は TF‑IDF のみで構築
+- `score_related_cli.py`
+  - クエリHTMLを引数で受け取り、単発検索を行う
+- `score_related_custom_cli.py`
+  - 全文書について JSON を `json/` 配下へ一括出力する
 
 事前埋め込み付きインデックス作成:
 
