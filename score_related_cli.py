@@ -5,6 +5,7 @@ score_related.py（単一クエリモード）を呼び出すクロスプラッ�
 - 無い場合は ./.models/sentence-bert-base-ja-mean-tokens-v2 をローカルに要求
 """
 
+import argparse
 import sys
 from pathlib import Path
 from types import SimpleNamespace as NS
@@ -13,11 +14,30 @@ import score_related as sr
 
 
 def main() -> None:
-    root = Path(__file__).resolve().parent
-    index_dir = root / "index"
+    ap = argparse.ArgumentParser(description="Search related pages using project defaults")
+    ap.add_argument("query", nargs="?", help="Query HTML path. Relative paths are resolved from the repo root.")
+    ap.add_argument("--index", type=Path, help="Index directory (default: ./index)")
+    ap.add_argument("--topk", type=int, default=30, help="Top K results (default: 30)")
+    ap.add_argument("--tau", type=float, default=0.05, help="Threshold (default: 0.05)")
+    cli_args = ap.parse_args()
 
-    # 注意: 実際に検索するクエリ HTML へのパスに必要に応じて変更してください
-    query_html = root / "html" / "ABC.html"
+    root = Path(__file__).resolve().parent
+    index_dir = cli_args.index if cli_args.index else (root / "index")
+
+    if not cli_args.query:
+        print(
+            "クエリHTMLを指定してください。例:\n"
+            "  python .\\score_related_cli.py .\\html\\page-bushou-下間真頼.html",
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+
+    query_html = Path(cli_args.query)
+    if not query_html.is_absolute():
+        query_html = root / query_html
+    if not query_html.exists():
+        print(f"[エラー] クエリHTMLが見つかりません: \"{query_html}\"", file=sys.stderr)
+        raise SystemExit(1)
 
     model_path = root / ".models" / "sentence-bert-base-ja-mean-tokens-v2"
 
@@ -60,8 +80,8 @@ def main() -> None:
         query=query_html,
         all=False,
         out_dir=root / "json",
-        topk=30,
-        tau=0.05,
+        topk=cli_args.topk,
+        tau=cli_args.tau,
         format="table",
         drop_selectors=",".join(drop_selectors),
         title_weight=3,
