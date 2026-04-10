@@ -18,6 +18,8 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from scipy import sparse
 import numpy as np
 
+from doc_context import build_doc_profile
+
 
 def normalize_text(s: str) -> str:
     """日本語向けの軽い正規化。
@@ -49,6 +51,7 @@ def extract_text_from_html(html: str, drop_selectors: List[str]) -> Dict[str, st
             t.decompose()
 
     title = (soup.title.get_text(" ", strip=True) if soup.title else "").strip()
+    h1 = (soup.select_one("h1").get_text(" ", strip=True) if soup.select_one("h1") else "").strip()
 
     # 見出しは h1~h3 を採用（必要なら拡張）
     headings = " ".join(
@@ -61,6 +64,7 @@ def extract_text_from_html(html: str, drop_selectors: List[str]) -> Dict[str, st
 
     return {
         "title": title,
+        "h1": h1,
         "headings": headings,
         "body": body,
     }
@@ -104,6 +108,7 @@ def build_index(src_dir: Path, out_dir: Path, ngram: int, min_df: int, max_df: f
     out_dir.mkdir(parents=True, exist_ok=True)
 
     doc_infos: List[Dict[str, Any]] = []
+    doc_profiles: Dict[str, Dict[str, Any]] = {}
     corpus: List[str] = []
     embed_texts: List[str] = []
 
@@ -114,26 +119,38 @@ def build_index(src_dir: Path, out_dir: Path, ngram: int, min_df: int, max_df: f
     for p in html_files:
         raw = p.read_text(encoding="utf-8", errors="ignore")
         parts = extract_text_from_html(raw, drop_selectors)
+        relpath = str(p.relative_to(src_dir))
+        profile = build_doc_profile(
+            relpath=relpath,
+            title=parts["title"],
+            h1=parts.get("h1", ""),
+            headings=parts["headings"],
+            body=parts["body"],
+        )
+        primary_title = profile["display_title"]
 
         # 重み付け: タイトル×w1 + 見出し×w2 + 本文
         weighted_text = (
-            ((parts["title"] + " ") * max(1, title_weight)) +
+            ((primary_title + " ") * max(1, title_weight)) +
             ((parts["headings"] + " ") * max(1, heading_weight)) +
             parts["body"]
         )
 
         text_norm = normalize_text(weighted_text)
         body_norm = normalize_text(parts["body"])  # ハッシュは本文ベース
-        embed_text = normalize_text((parts["title"] + " ") + (parts["headings"] + " ") + parts["body"])  # 埋め込み用
+        embed_text = normalize_text((primary_title + " ") + (parts["headings"] + " ") + parts["body"])  # 埋め込み用
         content_hash = hashlib.sha1(body_norm.encode("utf-8")).hexdigest()
 
-        relpath = str(p.relative_to(src_dir))
         doc_infos.append({
             "path": relpath,
-            "title": parts["title"],
+            "title": primary_title,
             "length": len(text_norm),
             "hash": content_hash,
+            "category": profile["category"],
+            "canonical_name": profile["canonical_name"],
+            "qualifier": profile["qualifier"],
         })
+        doc_profiles[str(len(doc_infos) - 1)] = profile
         corpus.append(text_norm)
         embed_texts.append(embed_text)
 
@@ -155,6 +172,9 @@ def build_index(src_dir: Path, out_dir: Path, ngram: int, min_df: int, max_df: f
     id_map = {i: doc_infos[i] for i in range(len(doc_infos))}
     (out_dir / "id_map.json").write_text(
         json.dumps(id_map, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    (out_dir / "doc_profiles.json").write_text(
+        json.dumps(doc_profiles, ensure_ascii=False, indent=2), encoding="utf-8"
     )
 
     # ベクトライザと行列

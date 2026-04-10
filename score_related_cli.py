@@ -72,9 +72,13 @@ def main() -> None:
         alpha=alpha,
         embed_max_chars=800,
         embed_overlap=200,
+        neighbor_k=20,
+        context_weight=0.18,
+        graph_weight=0.10,
     )
 
-    results = sr._score_single_query(args, vectorizer, X, id_map, src_root, drop_selectors)
+    doc_profiles = sr.load_doc_profiles(index_dir, id_map, src_root, drop_selectors)
+    results = sr._score_single_query(args, vectorizer, X, id_map, src_root, drop_selectors, doc_profiles, {})
     sr._print_results(results, args.format)
 
 

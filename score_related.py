@@ -14,17 +14,7 @@ from bs4 import BeautifulSoup
 from scipy import sparse
 from sklearn.metrics.pairwise import cosine_similarity
 
-# 取り回しのため、build_index.py の一部関数をこちらにも軽量実装
-import re
-import unicodedata
-
-def normalize_text(s: str) -> str:
-    """日本語向けの軽い正規化（NFKC・URL除去・空白圧縮）。"""
-    s = unicodedata.normalize("NFKC", s)
-    s = re.sub(r"https?://\S+", " ", s)
-    s = re.sub(r"\s+", " ", s)
-    return s.strip()
-
+from doc_context import build_doc_profile, normalize_text
 
 def extract_text_from_html(html: str, drop_selectors: List[str]) -> Dict[str, str]:
     """HTMLからタイトル・見出し・本文を抽出（指定セレクタは除去）。"""
@@ -38,10 +28,11 @@ def extract_text_from_html(html: str, drop_selectors: List[str]) -> Dict[str, st
         for t in soup.select(sel):
             t.decompose()
     title = (soup.title.get_text(" ", strip=True) if soup.title else "").strip()
+    h1 = (soup.select_one("h1").get_text(" ", strip=True) if soup.select_one("h1") else "").strip()
     headings = " ".join(h.get_text(" ", strip=True) for h in soup.select("h1, h2, h3")).strip()
     body_node = soup.body if soup.body else soup
     body = body_node.get_text(" ", strip=True)
-    return {"title": title, "headings": headings, "body": body}
+    return {"title": title, "h1": h1, "headings": headings, "body": body}
 
 
 def load_index(index_dir: Path):
@@ -53,12 +44,71 @@ def load_index(index_dir: Path):
     return vectorizer, X, id_map, Path(src_root)
 
 
+def load_doc_profiles(index_dir: Path, id_map: Dict[str, Any], src_root: Path, drop_selectors: List[str]) -> Dict[int, Dict[str, Any]]:
+    """文書の識別メタをロード。無ければHTMLから再構築する。"""
+    profiles_path = index_dir / "doc_profiles.json"
+    if profiles_path.exists():
+        raw = json.loads(profiles_path.read_text(encoding="utf-8"))
+        return {int(k): v for k, v in raw.items()}
+
+    profiles: Dict[int, Dict[str, Any]] = {}
+    for k, meta in id_map.items():
+        relpath = meta["path"]
+        p = Path(src_root) / relpath
+        raw_html = p.read_text(encoding="utf-8", errors="ignore")
+        parts = extract_text_from_html(raw_html, drop_selectors)
+        profiles[int(k)] = build_doc_profile(
+            relpath=relpath,
+            title=parts["title"],
+            h1=parts.get("h1", ""),
+            headings=parts["headings"],
+            body=parts["body"],
+        )
+    return profiles
+
+
+def build_query_profile(query_html_path: Path, relpath_hint: str, drop_selectors: List[str]) -> Dict[str, Any]:
+    raw = query_html_path.read_text(encoding="utf-8", errors="ignore")
+    parts = extract_text_from_html(raw, drop_selectors)
+    return build_doc_profile(
+        relpath=relpath_hint,
+        title=parts["title"],
+        h1=parts.get("h1", ""),
+        headings=parts["headings"],
+        body=parts["body"],
+    )
+
+
+def find_query_doc_id(query_html_path: Path, id_map: Dict[str, Any], src_root: Path) -> Optional[int]:
+    """クエリHTMLがインデックス内文書ならその doc_id を返す。"""
+    try:
+        query_resolved = query_html_path.resolve()
+    except Exception:
+        query_resolved = query_html_path
+    for k, meta in id_map.items():
+        candidate = Path(src_root) / meta["path"]
+        try:
+            if candidate.resolve() == query_resolved:
+                return int(k)
+        except Exception:
+            if str(candidate) == str(query_html_path):
+                return int(k)
+    return None
+
+
 def build_query_vector(query_html_path: Path, drop_selectors: List[str], title_weight: int, heading_weight: int, vectorizer) -> sparse.csr_matrix:
     """単一HTMLファイルからクエリベクトル（TF‑IDF）を構築する。"""
     raw = query_html_path.read_text(encoding="utf-8", errors="ignore")
     parts = extract_text_from_html(raw, drop_selectors)
+    profile = build_doc_profile(
+        relpath=query_html_path.name,
+        title=parts["title"],
+        h1=parts.get("h1", ""),
+        headings=parts["headings"],
+        body=parts["body"],
+    )
     weighted_text = (
-        ((parts["title"] + " ") * max(1, title_weight)) +
+        ((profile["display_title"] + " ") * max(1, title_weight)) +
         ((parts["headings"] + " ") * max(1, heading_weight)) +
         parts["body"]
     )
@@ -152,7 +202,14 @@ def _build_q_emb_for_doc(doc_id: int,
     p = Path(src_root) / id_map[str(int(doc_id))]["path"]
     raw_q = p.read_text(encoding="utf-8", errors="ignore")
     parts_q = extract_text_from_html(raw_q, drop_selectors)
-    q_text = normalize_text((parts_q["title"] + " ") + (parts_q["headings"] + " ") + parts_q["body"])
+    profile = build_doc_profile(
+        relpath=id_map[str(int(doc_id))]["path"],
+        title=parts_q["title"],
+        h1=parts_q.get("h1", ""),
+        headings=parts_q["headings"],
+        body=parts_q["body"],
+    )
+    q_text = normalize_text((profile["display_title"] + " ") + (parts_q["headings"] + " ") + parts_q["body"])
     q_chunks = _chunk_text(q_text, embed_max_chars, embed_overlap)
     if model is None or not q_chunks:
         return np.zeros((0, 0), dtype=np.float32)
@@ -203,7 +260,14 @@ def _compute_emb_scores_for_candidates(q_emb: np.ndarray,
         p2 = Path(src_root) / meta2["path"]
         raw2 = p2.read_text(encoding="utf-8", errors="ignore")
         parts2 = extract_text_from_html(raw2, drop_selectors)
-        d_text = normalize_text((parts2["title"] + " ") + (parts2["headings"] + " ") + parts2["body"])
+        profile2 = build_doc_profile(
+            relpath=meta2["path"],
+            title=parts2["title"],
+            h1=parts2.get("h1", ""),
+            headings=parts2["headings"],
+            body=parts2["body"],
+        )
+        d_text = normalize_text((profile2["display_title"] + " ") + (parts2["headings"] + " ") + parts2["body"])
         d_chunks = _chunk_text(d_text, embed_max_chars, embed_overlap)
         if not d_chunks:
             emb_scores[i2] = 0.0
@@ -232,13 +296,130 @@ def _fuse_and_sort_scores(cand_indices: np.ndarray,
     return cand_indices[sort_idx], fused[sort_idx]
 
 
+def _set_overlap_score(a_terms: List[str], b_terms: List[str]) -> float:
+    a = set(a_terms)
+    b = set(b_terms)
+    if not a or not b:
+        return 0.0
+    inter = len(a & b)
+    if inter == 0:
+        return 0.0
+    jaccard = inter / len(a | b)
+    coverage = inter / max(1, min(len(a), len(b)))
+    return 0.45 * jaccard + 0.55 * coverage
+
+
+def _profile_similarity(query_profile: Dict[str, Any], cand_profile: Dict[str, Any]) -> Tuple[float, float]:
+    qualifier_score = _set_overlap_score(
+        query_profile.get("qualifier_terms", []),
+        cand_profile.get("qualifier_terms", []),
+    )
+    context_score = _set_overlap_score(
+        query_profile.get("context_terms", []),
+        cand_profile.get("context_terms", []),
+    )
+    category_score = 1.0 if (
+        query_profile.get("category") and cand_profile.get("category") and
+        query_profile.get("category") == cand_profile.get("category")
+    ) else 0.0
+    same_name = (
+        bool(query_profile.get("canonical_name")) and
+        query_profile.get("canonical_name") == cand_profile.get("canonical_name")
+    )
+
+    identity_score = 0.55 * context_score + 0.35 * qualifier_score + 0.10 * category_score
+    penalty = 0.0
+    if same_name and query_profile.get("qualifier_terms") and cand_profile.get("qualifier_terms"):
+        if qualifier_score < 0.2 and context_score < 0.12:
+            penalty = 0.18
+        else:
+            identity_score += 0.08 * qualifier_score
+    return min(identity_score, 1.0), penalty
+
+
+def _get_cached_neighbors(doc_id: int,
+                          X: sparse.csr_matrix,
+                          neighbor_cache: Dict[int, np.ndarray],
+                          neighbor_k: int) -> np.ndarray:
+    cached = neighbor_cache.get(int(doc_id))
+    if cached is not None and len(cached) >= int(neighbor_k):
+        return cached[:int(neighbor_k)]
+    sims = cosine_similarity(X[int(doc_id):int(doc_id)+1], X).ravel()
+    sims[int(doc_id)] = -1.0
+    order = np.argsort(-sims)[:int(neighbor_k)]
+    neighbor_cache[int(doc_id)] = order.astype(np.int32)
+    return neighbor_cache[int(doc_id)]
+
+
+def _graph_support_scores(query_doc_id: Optional[int],
+                          query_neighbor_ids: np.ndarray,
+                          cand_indices: np.ndarray,
+                          X: sparse.csr_matrix,
+                          neighbor_cache: Dict[int, np.ndarray],
+                          neighbor_k: int) -> np.ndarray:
+    query_set = set(int(x) for x in query_neighbor_ids[:int(neighbor_k)])
+    scores = np.zeros(len(cand_indices), dtype=np.float32)
+    if not query_set:
+        return scores
+    for i2, idx in enumerate(cand_indices):
+        cand_neighbors = _get_cached_neighbors(int(idx), X, neighbor_cache, int(neighbor_k))
+        cand_set = set(int(x) for x in cand_neighbors)
+        shared = 0.0
+        if cand_set:
+            inter = len(query_set & cand_set)
+            if inter:
+                shared = inter / len(query_set | cand_set)
+        reciprocal = 1.0 if query_doc_id is not None and int(query_doc_id) in cand_set else 0.0
+        scores[i2] = 0.7 * shared + 0.3 * reciprocal
+    return scores
+
+
+def _rerank_with_context_and_graph(query_profile: Dict[str, Any],
+                                   query_doc_id: Optional[int],
+                                   cand_indices: np.ndarray,
+                                   base_scores: np.ndarray,
+                                   doc_profiles: Dict[int, Dict[str, Any]],
+                                   X: sparse.csr_matrix,
+                                   neighbor_cache: Dict[int, np.ndarray],
+                                   neighbor_k: int,
+                                   context_weight: float,
+                                   graph_weight: float) -> Tuple[np.ndarray, np.ndarray]:
+    context_scores = np.zeros(len(cand_indices), dtype=np.float32)
+    penalties = np.zeros(len(cand_indices), dtype=np.float32)
+    for i2, idx in enumerate(cand_indices):
+        identity_score, penalty = _profile_similarity(query_profile, doc_profiles.get(int(idx), {}))
+        context_scores[i2] = identity_score
+        penalties[i2] = penalty
+
+    graph_scores = _graph_support_scores(
+        query_doc_id=query_doc_id,
+        query_neighbor_ids=cand_indices[:int(neighbor_k)],
+        cand_indices=cand_indices,
+        X=X,
+        neighbor_cache=neighbor_cache,
+        neighbor_k=int(neighbor_k),
+    )
+
+    base_component = np.clip(base_scores, 0.0, 1.0)
+    final_scores = (
+        base_component +
+        float(context_weight) * context_scores +
+        float(graph_weight) * graph_scores -
+        penalties
+    )
+    final_scores = np.clip(final_scores, 0.0, 1.0)
+    sort_idx = np.argsort(-final_scores)
+    return cand_indices[sort_idx], final_scores[sort_idx]
+
+
 def _format_top_results(cand_indices: np.ndarray,
                         final_scores: np.ndarray,
                         id_map: Dict[str, Any],
                         src_root: Path,
                         topk: int,
                         tau: float,
-                        exclude_doc_id: Optional[int] = None) -> List[Dict[str, Any]]:
+                        exclude_doc_id: Optional[int] = None,
+                        doc_profiles: Optional[Dict[int, Dict[str, Any]]] = None) -> List[Dict[str, Any]]:
     """スコアとメタを整形してトップKの結果を返す。"""
     results: List[Dict[str, Any]] = []
     for idx, score in zip(cand_indices, final_scores):
@@ -247,12 +428,15 @@ def _format_top_results(cand_indices: np.ndarray,
         if float(score) < float(tau):
             continue
         meta = id_map[str(int(idx))]
+        title = meta.get("title", "")
+        if (not title) and doc_profiles is not None:
+            title = doc_profiles.get(int(idx), {}).get("display_title", "")
         results.append({
             "rank": len(results) + 1,
             "score": round(float(score), 4),
             "path": str(Path(src_root) / meta["path"]),
             "relpath": meta["path"],
-            "title": meta.get("title", ""),
+            "title": title,
         })
         if len(results) >= int(topk):
             break
@@ -303,7 +487,14 @@ def _build_q_emb_from_html(query_html_path: Path,
     """HTMLからクエリのチャンク埋め込みを生成。"""
     raw_q = query_html_path.read_text(encoding="utf-8", errors="ignore")
     parts_q = extract_text_from_html(raw_q, drop_selectors)
-    q_text = normalize_text((parts_q["title"] + " ") + (parts_q["headings"] + " ") + parts_q["body"])
+    profile = build_doc_profile(
+        relpath=query_html_path.name,
+        title=parts_q["title"],
+        h1=parts_q.get("h1", ""),
+        headings=parts_q["headings"],
+        body=parts_q["body"],
+    )
+    q_text = normalize_text((profile["display_title"] + " ") + (parts_q["headings"] + " ") + parts_q["body"])
     q_chunks = _chunk_text(q_text, embed_max_chars, embed_overlap)
     return _embed_texts(model, [t for _, _, t in q_chunks]) if q_chunks else np.zeros((0, 0), dtype=np.float32)
 
@@ -320,6 +511,11 @@ def compute_results_for_doc(doc_id: int,
                             embed_overlap: int,
                             alpha: float,
                             tau: float,
+                            doc_profiles: Dict[int, Dict[str, Any]],
+                            neighbor_cache: Dict[int, np.ndarray],
+                            neighbor_k: int,
+                            context_weight: float,
+                            graph_weight: float,
                             pre: Optional[Dict[str, Any]] = None,
                             model: Optional[object] = None) -> List[Dict[str, Any]]:
     """`--all` の1ドキュメントに対する検索と整形済み結果の取得。"""
@@ -337,7 +533,22 @@ def compute_results_for_doc(doc_id: int,
         cand_indices, final_scores = _fuse_and_sort_scores(cand_indices, sims, emb_doc_ids, emb_scores, str(rerank_mode), float(alpha))
     else:
         final_scores = sims[cand_indices]
-    return _format_top_results(cand_indices, final_scores, id_map, src_root, int(topk), float(tau), exclude_doc_id=int(doc_id))
+    cand_indices, final_scores = _rerank_with_context_and_graph(
+        query_profile=doc_profiles.get(int(doc_id), {}),
+        query_doc_id=int(doc_id),
+        cand_indices=cand_indices,
+        base_scores=final_scores,
+        doc_profiles=doc_profiles,
+        X=X,
+        neighbor_cache=neighbor_cache,
+        neighbor_k=int(neighbor_k),
+        context_weight=float(context_weight),
+        graph_weight=float(graph_weight),
+    )
+    return _format_top_results(
+        cand_indices, final_scores, id_map, src_root, int(topk), float(tau),
+        exclude_doc_id=int(doc_id), doc_profiles=doc_profiles
+    )
 
 
 def _score_single_query(args,
@@ -345,11 +556,17 @@ def _score_single_query(args,
                         X: sparse.csr_matrix,
                         id_map: Dict[str, Any],
                         src_root: Path,
-                        drop_selectors: List[str]) -> List[Dict[str, Any]]:
+                        drop_selectors: List[str],
+                        doc_profiles: Dict[int, Dict[str, Any]],
+                        neighbor_cache: Dict[int, np.ndarray]) -> List[Dict[str, Any]]:
     """単一クエリ（--query）に対する検索と整形済み結果の取得。"""
     qvec = build_query_vector(args.query, drop_selectors, args.title_weight, args.heading_weight, vectorizer)
     sims = cosine_similarity(qvec, X).ravel()
+    query_doc_id = find_query_doc_id(args.query, id_map, src_root)
+    if query_doc_id is not None:
+        sims[int(query_doc_id)] = -1.0
     cand_indices = _select_candidates_from_sims(sims, int(args.topk), int(args.rerank_topk))
+    query_profile = build_query_profile(args.query, args.query.name, drop_selectors)
     if args.rerank_mode != "none":
         pre, model = _prepare_rerank_for_single(args.index, args.rerank_mode, args.rerank_model)
         q_emb = _build_q_emb_from_html(args.query, drop_selectors, model, int(args.embed_max_chars), int(args.embed_overlap))
@@ -359,7 +576,22 @@ def _score_single_query(args,
         cand_indices, final_scores = _fuse_and_sort_scores(cand_indices, sims, emb_doc_ids, emb_scores, str(args.rerank_mode), float(args.alpha))
     else:
         final_scores = sims[cand_indices]
-    return _format_top_results(cand_indices, final_scores, id_map, src_root, int(args.topk), float(args.tau))
+    cand_indices, final_scores = _rerank_with_context_and_graph(
+        query_profile=query_profile,
+        query_doc_id=query_doc_id,
+        cand_indices=cand_indices,
+        base_scores=final_scores,
+        doc_profiles=doc_profiles,
+        X=X,
+        neighbor_cache=neighbor_cache,
+        neighbor_k=int(args.neighbor_k),
+        context_weight=float(args.context_weight),
+        graph_weight=float(args.graph_weight),
+    )
+    return _format_top_results(
+        cand_indices, final_scores, id_map, src_root, int(args.topk), float(args.tau),
+        exclude_doc_id=query_doc_id, doc_profiles=doc_profiles
+    )
 
 
 def _print_results(results: List[Dict[str, Any]], fmt: str) -> None:
@@ -401,10 +633,15 @@ def main():
     ap.add_argument("--alpha", type=float, default=0.5, help="Hybrid weight: alpha*tfidf + (1-alpha)*embed")
     ap.add_argument("--embed-max-chars", type=int, default=800, help="Max characters per chunk for embeddings (default: 800)")
     ap.add_argument("--embed-overlap", type=int, default=200, help="Overlap characters between chunks (default: 200)")
+    ap.add_argument("--neighbor-k", type=int, default=20, help="Neighbor size for mutual/shared-neighbor reranking (default: 20)")
+    ap.add_argument("--context-weight", type=float, default=0.18, help="Weight for identity/context reranking features (default: 0.18)")
+    ap.add_argument("--graph-weight", type=float, default=0.10, help="Weight for mutual/shared-neighbor graph features (default: 0.10)")
 
     args = ap.parse_args()
     vectorizer, X, id_map, src_root = load_index(args.index)
     drop_selectors = [s.strip() for s in args.drop_selectors.split(",") if s.strip()]
+    doc_profiles = load_doc_profiles(args.index, id_map, src_root, drop_selectors)
+    neighbor_cache: Dict[int, np.ndarray] = {}
 
     if args.all:
         out_dir: Path = args.out_dir
@@ -422,6 +659,7 @@ def main():
                 int(sid), X, id_map, src_root, drop_selectors,
                 args.rerank_mode, args.rerank_topk, args.topk,
                 args.embed_max_chars, args.embed_overlap, args.alpha, args.tau,
+                doc_profiles, neighbor_cache, args.neighbor_k, args.context_weight, args.graph_weight,
                 pre, model
             )
             out_path.write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -430,7 +668,7 @@ def main():
     # Single query mode
     if not args.query:
         raise SystemExit("--query is required unless --all is specified")
-    results = _score_single_query(args, vectorizer, X, id_map, src_root, drop_selectors)
+    results = _score_single_query(args, vectorizer, X, id_map, src_root, drop_selectors, doc_profiles, neighbor_cache)
     _print_results(results, args.format)
 
 

@@ -4,6 +4,8 @@
 
 HTMLファイル群からインデックスを構築し、ある1枚のHTML（A.html）に関連する他HTMLをランキングします。基本は文字3‑gramのTF‑IDF + コサイン類似度。任意で Sentence-Transformers による「埋め込みリランク（再ランキング）」を使えます。外部APIには依存せず、ローカルモデル/ファイルのみで動作します。戦国時代テーマの日本語に最適化するため、埋め込みは日本語特化モデルの使用を推奨します。
 
+最新版では、戦国時代の人物・姫・合戦・逸話・名物のような近接ドメインでの取り違えを減らすため、`同姓同名/近縁名の識別文脈` と `近傍グラフ（mutual/shared neighbors）` を使った文脈再ランキングも加えています。特に `島津忠長（島津尚久の子）` のような括弧付き識別子、家系・主君・合戦名・城名のような周辺語を拾って最終順位に反映します。
+
 ---
 
 ## セットアップ
@@ -110,6 +112,7 @@ python build_index.py \
 - `tfidf_vectorizer.pkl`（ベクトライザ）
 - `tfidf_matrix.npz`（疎行列X）
 - `id_map.json` / `docs.jsonl`（メタ情報: 相対パス・タイトル等）
+- `doc_profiles.json`（カテゴリ、正規化名、括弧内識別子、文脈語）
 - `source_root.txt`（ソースのルートパス）
 - 埋め込みを有効にした場合:
  - `embeddings.npy`（全チャンクの埋め込み行列; float32, L2正規化済）
@@ -166,6 +169,13 @@ python score_related.py \
 - `--rerank-topk`: TF‑IDFの上位Kをリランク対象に
 - `--alpha`: ハイブリッドの重み（`alpha*TFIDF + (1-alpha)*Embedding`）
 - `--embed-max-chars`, `--embed-overlap`: チャンク分割設定
+- `--neighbor-k`: mutual/shared-neighbor に使う近傍数
+- `--context-weight`: 同姓同名の識別や関係語整合性に使う文脈スコアの重み
+- `--graph-weight`: mutual/shared-neighbor グラフスコアの重み
+
+補足:
+- 文脈再ランキングは `rerank-mode` に関係なく常に効きます。TF‑IDF/埋め込みで作った候補列を、`家系・主君・合戦名・城名・括弧内識別子` と `共有近傍` で最後に整えます。
+- 単純な「A→B と B→A の両方向一致」ではなく、`共有近傍` も見るため、同姓同名や近縁名の武将ページでも周辺文脈の近さを拾いやすくしています。
 
 ### 全件バッチ出力（静的JSON生成）: `--all`
 
