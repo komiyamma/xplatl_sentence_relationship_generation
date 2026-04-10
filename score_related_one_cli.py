@@ -27,7 +27,7 @@ def main() -> None:
     if not cli_args.query:
         print(
             "クエリHTMLを指定してください。例:\n"
-            "  python .\\score_related_cli.py .\\html\\page-bushou-下間真頼.html",
+            "  python .\\score_related_one_cli.py .\\html\\page-bushou-下間真頼.html",
             file=sys.stderr,
         )
         raise SystemExit(2)

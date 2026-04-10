@@ -160,23 +160,23 @@ E5 系（`intfloat/multilingual-e5-*`）は検索用途に強力ですが、英�
 
 ## 9. 代表的な実行例
 
-既定値で素早く動かす用途には、同梱のラッパー `build_index_cli.py` / `score_related_cli.py` / `score_related_custom_cli.py` も利用できます（クロスプラットフォーム）。以下はコマンド引数で柔軟に指定する直叙的な実行例です。
+既定値で素早く動かす用途には、同梱のラッパー `build_index_cli.py` / `score_related_one_cli.py` / `score_related_all_cli.py` も利用できます（クロスプラットフォーム）。以下はコマンド引数で柔軟に指定する直叙的な実行例です。
 
 ラッパー運用の基本:
 
 ```bash
 python build_index_cli.py
-python score_related_cli.py ./html/page-bushou-下間真頼.html
-python score_related_custom_cli.py
+python score_related_one_cli.py ./html/page-bushou-下間真頼.html
+python score_related_all_cli.py
 ```
 
 - `build_index_cli.py`
   - 既定値で `html/` → `index/` を構築
   - `./.models/sentence-bert-base-ja-mean-tokens-v2` があれば埋め込みも事前計算
   - モデルが無い場合は TF‑IDF のみで構築
-- `score_related_cli.py`
+- `score_related_one_cli.py`
   - クエリHTMLを引数で受け取り、単発検索を行う
-- `score_related_custom_cli.py`
+- `score_related_all_cli.py`
   - 全文書について JSON を `json/` 配下へ一括出力する
 
 事前埋め込み付きインデックス作成:
